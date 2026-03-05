@@ -1,890 +1,1304 @@
-"use client"
+'use client'
 
-import { useState, useRef, useEffect } from "react"
-import { submitToFormspree } from "@/lib/formspree"
-import { LESDOEL_SUGGESTION, LESPLAN_INTRO, CHAT_RESPONSES, STEPS } from "@/lib/predetermined-responses"
-import { v4 as uuidv4 } from "uuid"
+import { useState, useEffect } from 'react'
+import {
+  EXPERIMENT_TEXT, BASELINE_TEXT, ERRORS, N_ERRORS, LESSON_LESDOEL
+} from '@/lib/experiment-content'
+import { levenshtein, countCorrectedErrors } from '@/lib/metrics'
+
+// ─── Color Palette (MaxAssist tailwind.config.ts) ─────────────────────────────
+// maxPrimary: #F71E63   ← hot pink (buttons border/text)
+// maxOrange:  #F9703D   ← orange
+// maxGreen:   #039B96   ← teal (brand color, active states, lesdoel)
+// lightGrey:  #FAFBFD   ← page background
+// button "primary" variant = gradient from #E13AA1 → #FF6633, rounded-full
+// button "default" variant = rounded-full, border-2 border-maxPrimary, text-maxPrimary
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface LessonForm {
-  onderwerp: string
-  doelgroep: string
-  referentieNiveau: string
-  lesdoel: string
-  lesduur: number | ""
+type AuthoringTab = 'lesplan' | 'lesoverzicht' | 'les' | 'voorvertoning'
+type AppStep = 'details' | 'authoring' | 'completed'
+
+const EDUCATION_LEVELS = [
+  {
+    id: 'PO',
+    label: 'PO',
+    subLevels: [
+      { id: 'groep1-2', label: 'Groep 1-2' },
+      { id: 'groep3-4', label: 'Groep 3-4' },
+      { id: 'groep5-6', label: 'Groep 5-6' },
+      { id: 'groep7-8', label: 'Groep 7-8' },
+      { id: 'anders', label: 'Anders...' },
+    ],
+  },
+  {
+    id: 'VO',
+    label: 'VO',
+    subLevels: [
+      {
+        id: 'vmbo',
+        label: 'VMBO',
+        subSubLevels: [
+          { id: 'basis', label: 'Basis' },
+          { id: 'kader', label: 'Kader' },
+          { id: 'gt', label: 'Gemengd/Theoretisch' },
+          { id: 'anders', label: 'Anders...' },
+        ],
+      },
+      { id: 'havo', label: 'HAVO' },
+      { id: 'vwo', label: 'VWO' },
+      { id: 'anders', label: 'Anders...' },
+    ],
+  },
+  {
+    id: 'MBO',
+    label: 'MBO',
+    subLevels: [
+      { id: 'niveau1', label: 'Niveau 1' },
+      { id: 'niveau2', label: 'Niveau 2' },
+      { id: 'niveau3', label: 'Niveau 3' },
+      { id: 'niveau4', label: 'Niveau 4' },
+      { id: 'anders', label: 'Anders...' },
+    ],
+  },
+  {
+    id: 'HBO_WO',
+    label: 'HBO/WO',
+    subLevels: [
+      { id: 'hbo', label: 'HBO' },
+      { id: 'wo', label: 'WO' },
+      { id: 'anders', label: 'Anders...' },
+    ],
+  },
+  {
+    id: 'Anders',
+    label: 'Anders',
+  },
+]
+
+function getEducationLevel(id: string) {
+  return EDUCATION_LEVELS.find((level) => level.id === id)
 }
 
-interface ChatMessage {
-  role: "user" | "assistant"
-  text: string
+function getEducationSubLevel(mainLevelId: string, subLevelId: string) {
+  const mainLevel = getEducationLevel(mainLevelId)
+  return mainLevel?.subLevels?.find((subLevel) => subLevel.id === subLevelId)
 }
 
-// ─── Brand colors (matching the real app) ─────────────────────────────────────
-const TEAL = "#039B96"
-const PINK = "#F71E63"
-
-// ─── Small reusable components ────────────────────────────────────────────────
-function MetroLine({ step }: { step: number }) {
-  return (
-    <div className="flex items-center gap-2 mb-8">
-      {STEPS.map((s, i) => (
-        <div key={s.id} className="flex items-center gap-2">
-          <div
-            className="flex flex-col items-center gap-1"
-            style={{ minWidth: 80 }}
-          >
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white transition-all"
-              style={{
-                background: step >= s.id ? TEAL : "#e5e7eb",
-                color: step >= s.id ? "white" : "#9ca3af",
-              }}
-            >
-              {step > s.id ? (
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <path d="M2 7l3.5 3.5L12 3" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              ) : (
-                s.id
-              )}
-            </div>
-            <span className="text-xs text-gray-500 text-center hidden md:block">{s.label}</span>
-          </div>
-          {i < STEPS.length - 1 && (
-            <div
-              className="flex-1 h-0.5 transition-all"
-              style={{ background: step > s.id ? TEAL : "#e5e7eb", minWidth: 20 }}
-            />
-          )}
-        </div>
-      ))}
-    </div>
-  )
+function getEducationSubSubLevel(mainLevelId: string, subLevelId: string, subSubLevelId: string) {
+  const subLevel = getEducationSubLevel(mainLevelId, subLevelId)
+  return subLevel?.subSubLevels?.find((subSubLevel) => subSubLevel.id === subSubLevelId)
 }
 
-function Label({ children }: { children: React.ReactNode }) {
-  return <label className="block text-sm font-medium text-gray-700 mb-1">{children}</label>
-}
+function composeDoelgroep(
+  mainLevel?: string,
+  subLevel?: string,
+  subSubLevel?: string,
+  customEducation?: string,
+  customSubLevel?: string,
+  customSubSubLevel?: string
+) {
+  if (!mainLevel) return ''
 
-function Input({
-  value,
-  onChange,
-  placeholder,
-  type = "text",
-  disabled,
-}: {
-  value: string | number
-  onChange: (v: string) => void
-  placeholder?: string
-  type?: string
-  disabled?: boolean
-}) {
-  return (
-    <input
-      type={type}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      disabled={disabled}
-      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-400"
-      style={{ focusBorderColor: TEAL } as React.CSSProperties}
-    />
-  )
-}
+  const parts: string[] = []
+  const mainLevelData = getEducationLevel(mainLevel)
 
-function Textarea({
-  value,
-  onChange,
-  placeholder,
-  rows = 3,
-  disabled,
-}: {
-  value: string
-  onChange: (v: string) => void
-  placeholder?: string
-  rows?: number
-  disabled?: boolean
-}) {
-  return (
-    <textarea
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      rows={rows}
-      disabled={disabled}
-      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 resize-none disabled:bg-gray-50 disabled:text-gray-400"
-    />
-  )
-}
-
-function Button({
-  children,
-  onClick,
-  variant = "primary",
-  disabled,
-  fullWidth,
-  size = "md",
-}: {
-  children: React.ReactNode
-  onClick?: () => void
-  variant?: "primary" | "outline" | "ghost" | "danger"
-  disabled?: boolean
-  fullWidth?: boolean
-  size?: "sm" | "md" | "lg"
-}) {
-  const base =
-    "inline-flex items-center justify-center gap-2 font-medium rounded-lg transition-all focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-  const sizes = { sm: "px-3 py-1.5 text-sm", md: "px-4 py-2 text-sm", lg: "px-6 py-3 text-base" }
-  const variants = {
-    primary: "text-white",
-    outline: "border border-gray-300 bg-white text-gray-700 hover:bg-gray-50",
-    ghost: "bg-transparent text-gray-600 hover:bg-gray-100",
-    danger: "text-white bg-red-600 hover:bg-red-700",
+  if (mainLevel === 'Anders') {
+    return customEducation?.trim() || ''
   }
-  const primaryStyle = variant === "primary" ? { background: TEAL } : {}
 
+  if (mainLevelData) {
+    parts.push(mainLevelData.label)
+  }
+
+  if (subLevel) {
+    if (subLevel === 'anders') {
+      if (customSubLevel?.trim()) parts.push(customSubLevel.trim())
+    } else {
+      const subLevelData = getEducationSubLevel(mainLevel, subLevel)
+      if (subLevelData) parts.push(subLevelData.label)
+    }
+  }
+
+  if (subSubLevel) {
+    if (subSubLevel === 'anders') {
+      if (customSubSubLevel?.trim()) parts.push(customSubSubLevel.trim())
+    } else {
+      const subSubLevelData = getEducationSubSubLevel(mainLevel, subLevel || '', subSubLevel)
+      if (subSubLevelData) parts.push(subSubLevelData.label)
+    }
+  }
+
+  return parts.join(' - ')
+}
+
+/** Pill button matching MaxAssist button variants exactly */
+function Btn({
+  children, onClick, disabled = false,
+  variant = 'default', className = '', type = 'button',
+}: {
+  children: React.ReactNode; onClick?: () => void; disabled?: boolean
+  variant?: 'default' | 'primary' | 'secondary' | 'outline' | 'ghost'
+  className?: string; type?: 'button' | 'submit'
+}) {
+  const base = 'inline-flex items-center justify-center whitespace-nowrap rounded-full text-sm font-medium transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 h-10 px-4 py-2'
+  const v: Record<string, string> = {
+    primary:   'bg-gradient-to-r from-[#E13AA1] hover:from-[#e13aa1c4] to-[#F63] hover:to-[#ff6633ce] text-white',
+    default:   'border-2 border-[#F71E63] text-[#F71E63] bg-white hover:border-[#E13AA1] disabled:border-0 disabled:bg-slate-200 disabled:text-slate-600',
+    secondary: 'bg-[#f4f4f5] text-[#18181b] hover:bg-[#e4e4e7]',
+    outline:   'border border-[#e4e4e7] bg-white hover:bg-[#f4f4f5] hover:text-[#18181b]',
+    ghost:     'hover:bg-[#f4f4f5] hover:text-[#18181b]',
+  }
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`${base} ${sizes[size]} ${variants[variant]} ${fullWidth ? "w-full" : ""}`}
-      style={primaryStyle}
-    >
+    <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${v[variant]} ${className}`}>
       {children}
     </button>
   )
 }
 
-// ─── Chat sidebar ─────────────────────────────────────────────────────────────
-function ChatSidebar({
-  messages,
-  onSend,
-  isTyping,
-}: {
-  messages: ChatMessage[]
-  onSend: (msg: string) => void
-  isTyping: boolean
-}) {
-  const [input, setInput] = useState("")
-  const bottomRef = useRef<HTMLDivElement>(null)
+/** Green teal lesdoel card */
+function LesdoelCard({ lesdoel }: { lesdoel: string }) {
+  return (
+    <div className="rounded-lg bg-[#039B96] p-3 text-white text-sm w-full max-h-32 overflow-y-auto cursor-pointer hover:bg-[#038a86] transition-colors">
+      <div className="flex items-center justify-between pb-2">
+        <p className="font-bold">Lesdoel</p>
+      </div>
+      <p>{lesdoel || <span className="italic opacity-75">Geen lesdoel ingesteld</span>}</p>
+    </div>
+  )
+}
+
+/** Metro progress line matching original exactly */
+function MetroLine({ step }: { step: number }) {
+  const items = [
+    { id: 1, label: 'Lesplan' },
+    { id: 2, label: 'Lesoverzicht' },
+    { id: 3, label: 'Les' },
+    { id: 4, label: 'Voorvertoning' },
+  ]
+  return (
+    <div id="metro-line" className="mt-6 md:mt-0">
+      <div className="relative p-5">
+        <div className="ml-8 mr-10 absolute top-0 left-0 right-0 h-[6px] bg-[#FAFBFD] z-0" />
+        <ul className="flex justify-between list-none p-0 m-0">
+          {items.map(({ id, label }) => {
+            const active = id === step, completed = id < step
+            return (
+              <li key={id} className="relative flex flex-col items-center">
+                <span className={[
+                  'absolute -top-7 left-1/2 -translate-x-1/2 w-6 h-6 border-8 rounded-full flex items-center justify-center',
+                  completed ? 'border-[#039B96] bg-[#039B96]'
+                  : active ? 'border-[#F9703D] bg-white'
+                  : 'border-slate-100 bg-slate-300'
+                ].join(' ')}>
+                  {completed && (
+                    <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </span>
+                <span className={`mt-2 text-xs ${active ? 'font-bold' : 'text-gray-400'}`}>{label}</span>
+              </li>
+            )
+          })}
+        </ul>
+      </div>
+      <hr className="mt-3 mb-7 border-gray-200" />
+    </div>
+  )
+}
+
+/** Toggle switch matching original */
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button type="button" onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors ${checked ? 'bg-[#039B96]' : 'bg-gray-200'}`}>
+      <span className={`block h-4 w-4 mt-0.5 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+    </button>
+  )
+}
+
+/** Max chatbox right panel */
+function ChatPanel({ lesdoel }: { lesdoel: string }) {
+  return (
+    <div className="hidden lg:flex lg:flex-col lg:w-2/5 lg:min-w-0 lg:gap-4">
+      <div className="shrink-0"><LesdoelCard lesdoel={lesdoel} /></div>
+      <div className="flex-1 min-h-0 border border-gray-200 rounded-lg bg-white overflow-hidden flex flex-col">
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-white">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-r from-[#E13AA1] to-[#F63] flex items-center justify-center text-white text-xs font-bold shrink-0">M</div>
+          <span className="text-sm font-medium">Max</span>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4" id="scroller">
+          <div className="flex gap-2 items-end">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-r from-[#E13AA1] to-[#F63] shrink-0 flex items-center justify-center text-white text-[10px] font-bold">M</div>
+            <div className="bg-[#FAFBFD] rounded-xl rounded-bl-none px-4 py-3 text-sm text-gray-700 max-w-[85%]">
+              Hoi, ik ben Max! Ik heb de lesinhoud voor je gegenereerd. Controleer de inhoud en pas aan waar nodig.
+            </div>
+          </div>
+          <div id="anchor" className="h-px overflow-anchor-auto" />
+        </div>
+        <div className="p-3 border-t border-gray-100 flex gap-2 items-center">
+          <input readOnly placeholder="Stel Max een vraag..."
+            className="flex-1 text-sm border border-gray-200 rounded-full px-3 py-2 bg-[#FAFBFD] focus:outline-none" />
+          <button className="w-9 h-9 rounded-full bg-[#FAFBFD] border border-gray-200 flex items-center justify-center text-gray-400 shrink-0">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Root App ──────────────────────────────────────────────────────────────────
+export default function ExperimentPage() {
+  const [appStep, setAppStep]             = useState<AppStep>('details')
+  const [activeTab, setActiveTab]         = useState<AuthoringTab>('lesplan')
+
+  // LesDetails
+  const [educatieNiveau, setEducatieNiveau]           = useState('')
+  const [educatieSubNiveau, setEducatieSubNiveau]     = useState('')
+  const [educatieSubSubNiveau, setEducatieSubSubNiveau] = useState('')
+  const [customEducation, setCustomEducation]         = useState('')
+  const [customSubLevel, setCustomSubLevel]           = useState('')
+  const [customSubSubLevel, setCustomSubSubLevel]     = useState('')
+  const [onderwerp, setOnderwerp]                     = useState('')
+  const [lesdoel, setLesdoel]                         = useState('')
+  const [referentieNiveau, setReferentieNiveau]       = useState('B1')
+  const [kwalificatieEnabled, setKwalificatieEnabled] = useState(false)
+  const [taxonomieEnabled, setTaxonomieEnabled]       = useState(false)
+  const [selectedTaxonomie, setSelectedTaxonomie]     = useState('')
+  const [selectedTaxNiveau, setSelectedTaxNiveau]     = useState('')
+
+  // Lesplan
+  const [lesduur, setLesduur]           = useState<number | undefined>()
+  const VERWERKING_OPDRACHT             = 'Schrijf een samenvatting van de les in maximaal 150 woorden.'
+
+  // Lesoverzicht
+  type Phase = 'introductie' | 'instructie' | 'verwerking' | 'afronding'
+  const [lessonOutline, setLessonOutline] = useState<Record<Phase, { active: boolean; topics: { id: string; title: string }[] }>>({
+    introductie: { active: true, topics: [{ id: '1', title: 'Activeer voorkennis over planten' }, { id: '2', title: 'Introduceer energie in biologische systemen' }] },
+    instructie:  { active: true, topics: [{ id: '3', title: 'Uitleg fotosynthese vergelijking' }, { id: '4', title: 'Benodigde stoffen voor fotosynthese' }, { id: '5', title: 'Factoren die snelheid beïnvloeden' }] },
+    verwerking:  { active: true, topics: [{ id: '6', title: 'Grafiek analyseren' }, { id: '7', title: 'Experiment ontwerpen' }] },
+    afronding:   { active: true, topics: [{ id: '8', title: 'Kernvraag bespreken' }, { id: '9', title: 'Reflectie op lesdoel' }] },
+  })
+
+  // Les text (editable)
+  const [lesText, setLesText] = useState(EXPERIMENT_TEXT)
+
+  // Share modal
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [shareTab, setShareTab]             = useState<'students' | 'colleagues'>('students')
+  const [submitting, setSubmitting]         = useState(false)
+  const [submitError, setSubmitError]       = useState<string | null>(null)
+  const [participantId, setParticipantId]   = useState('unknown')
+  const [condition, setCondition]           = useState('baseline')
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages, isTyping])
+    const p = new URLSearchParams(window.location.search)
+    setParticipantId(p.get('pid') || 'unknown')
+    setCondition(p.get('condition') || 'baseline')
+  }, [])
 
-  const send = () => {
-    if (!input.trim()) return
-    onSend(input.trim())
-    setInput("")
+  const doelgroep = composeDoelgroep(
+    educatieNiveau,
+    educatieSubNiveau,
+    educatieSubSubNiveau,
+    customEducation,
+    customSubLevel,
+    customSubSubLevel
+  )
+  const wordCount = onderwerp.trim().split(/\s+/).filter(Boolean).length
+  const isDetailsValid = doelgroep.length > 0 && wordCount >= 3 && lesdoel.trim().length > 0
+
+  const handleSaveDetails = () => {
+    if (!isDetailsValid) return
+    setAppStep('authoring')
   }
 
-  return (
-    <div className="flex flex-col h-full border-l bg-gray-50">
-      {/* Header */}
-      <div className="p-4 border-b bg-white flex items-center gap-3">
-        <img src="/max-button.svg" alt="Max" className="w-8 h-8" />
-        <div>
-          <p className="font-semibold text-sm text-gray-800">Max</p>
-          <p className="text-xs text-gray-500">AI-assistent</p>
-        </div>
-      </div>
+  const handleDeelMetCollega = async () => {
+    setSubmitting(true)
+    setSubmitError(null)
+    const { corrected, uncorrected } = countCorrectedErrors(lesText, ERRORS)
+    const lev = levenshtein(lesText, BASELINE_TEXT)
+    try {
+      const res = await fetch('https://formspree.io/f/YOUR_FORMSPREE_ID', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          participant_id: participantId,
+          condition,
+          error_correction_rate: corrected.length / N_ERRORS,
+          errors_corrected: corrected.join(','),
+          errors_uncorrected: uncorrected.join(','),
+          levenshtein_distance: lev,
+          final_text: lesText,
+          submitted_at: new Date().toISOString(),
+        }),
+      })
+      if (!res.ok) throw new Error('failed')
+      setShareModalOpen(false)
+      setAppStep('completed')
+    } catch {
+      setSubmitError('Er is iets misgegaan bij het opslaan. Probeer het opnieuw.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        {messages.map((m, i) => (
-          <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-            {m.role === "assistant" && (
-              <img src="/max-button.svg" alt="Max" className="w-6 h-6 mr-2 mt-1 flex-shrink-0" />
-            )}
-            <div
-              className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
-                m.role === "user" ? "text-white rounded-tr-none" : "bg-white border rounded-tl-none text-gray-800"
-              }`}
-              style={m.role === "user" ? { background: TEAL } : {}}
-            >
-              {m.text}
-            </div>
-          </div>
-        ))}
-        {isTyping && (
-          <div className="flex justify-start">
-            <img src="/max-button.svg" alt="Max" className="w-6 h-6 mr-2 mt-1 flex-shrink-0" />
-            <div className="bg-white border rounded-2xl rounded-tl-none px-3 py-2">
-              <div className="flex gap-1">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"
-                    style={{ animationDelay: `${i * 0.15}s` }}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-        <div ref={bottomRef} />
-      </div>
+  if (appStep === 'completed') return <CompletionScreen />
 
-      {/* Input */}
-      <div className="p-3 border-t bg-white flex gap-2">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-          placeholder="Stel een vraag aan Max…"
-          className="flex-1 border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none"
-        />
-        <button
-          onClick={send}
-          disabled={!input.trim()}
-          className="w-9 h-9 rounded-full flex items-center justify-center text-white disabled:opacity-40"
-          style={{ background: TEAL }}
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M14 2L2 7l5 2 2 5 5-12z" fill="white" />
-          </svg>
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ─── STEP 1: Lesson details ───────────────────────────────────────────────────
-function Step1Setup({
-  form,
-  setForm,
-  onNext,
-  chatMessages,
-  onChatSend,
-  isTyping,
-  onGenerateLesdoel,
-  isGeneratingLesdoel,
-}: {
-  form: LessonForm
-  setForm: (f: LessonForm) => void
-  onNext: () => void
-  chatMessages: ChatMessage[]
-  onChatSend: (msg: string) => void
-  isTyping: boolean
-  onGenerateLesdoel: () => void
-  isGeneratingLesdoel: boolean
-}) {
-  const canNext = form.onderwerp.trim().split(/\s+/).filter(Boolean).length >= 3 && form.doelgroep.trim()
+  const activeLesdoel = lesdoel || LESSON_LESDOEL
 
   return (
-    <div className="flex h-[calc(100vh-5.5rem)] gap-0">
-      {/* Main form */}
-      <div className="flex-1 overflow-y-auto p-8 pb-32 max-w-2xl">
-        <MetroLine step={1} />
-        <h1 className="text-2xl font-bold mb-1" style={{ fontFamily: "Montserrat, sans-serif" }}>
-          Lesdetails
-        </h1>
-        <p className="text-gray-500 text-sm mb-8">Vul de basisinformatie in om je les op te bouwen.</p>
+    <div className="min-h-screen bg-[#FAFBFD]" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
+      <div className="flex h-screen overflow-hidden">
 
-        <div className="space-y-5">
-          <div>
-            <Label>
-              Onderwerp <span className="text-gray-400 text-xs">(minimaal 3 woorden)</span>
-            </Label>
-            <Input
-              value={form.onderwerp}
-              onChange={(v) => setForm({ ...form, onderwerp: v })}
-              placeholder="Bijv. Klimaatverandering en de broeikaswerking"
-            />
+        {/* Left sidebar */}
+        <aside className="hidden md:flex flex-col w-20 bg-white border-r border-gray-100 pt-4 pb-6 items-center shrink-0">
+          <div className="mb-6">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-r from-[#E13AA1] to-[#F63] flex items-center justify-center text-white font-bold text-sm">M</div>
           </div>
+        </aside>
 
-          <div>
-            <Label>Doelgroep</Label>
-            <Input
-              value={form.doelgroep}
-              onChange={(v) => setForm({ ...form, doelgroep: v })}
-              placeholder="Bijv. VMBO-t klas 3, MBO niveau 2"
-            />
-          </div>
-
-          <div>
-            <Label>Referentieniveau</Label>
-            <select
-              value={form.referentieNiveau}
-              onChange={(e) => setForm({ ...form, referentieNiveau: e.target.value })}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none"
-            >
-              {["1F", "2F", "3F", "4F", "A1", "A2", "B1", "B2", "C1", "C2"].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
+        {/* Main */}
+        <main className="flex-1 overflow-hidden flex flex-col">
+          {/* Authoring tab bar */}
+          {appStep === 'authoring' && (
+            <div className="bg-white border-b border-gray-200 px-5 flex gap-1 pt-2 shrink-0">
+              {(['lesplan', 'lesoverzicht', 'les', 'voorvertoning'] as AuthoringTab[]).map((tab) => (
+                <button key={tab} onClick={() => setActiveTab(tab)}
+                  className={`px-5 py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-all ${
+                    activeTab === tab
+                      ? 'border-[#039B96] text-gray-900 bg-white'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                  }`}>
+                  {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                </button>
               ))}
-            </select>
-          </div>
-
-          <div>
-            <Label>Lesduur (minuten)</Label>
-            <Input
-              type="number"
-              value={form.lesduur}
-              onChange={(v) => setForm({ ...form, lesduur: v === "" ? "" : Number(v) })}
-              placeholder="45"
-            />
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <Label>Lesdoel</Label>
-              <button
-                onClick={onGenerateLesdoel}
-                disabled={isGeneratingLesdoel || !form.onderwerp.trim()}
-                className="text-xs flex items-center gap-1 disabled:opacity-40"
-                style={{ color: TEAL }}
-              >
-                {isGeneratingLesdoel ? (
-                  <span className="animate-pulse">Max genereert…</span>
-                ) : (
-                  <>
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                      <path
-                        d="M6 1v2M6 9v2M1 6h2M9 6h2M2.5 2.5l1.4 1.4M8.1 8.1l1.4 1.4M2.5 9.5l1.4-1.4M8.1 3.9l1.4-1.4"
-                        stroke="currentColor"
-                        strokeWidth="1.2"
-                        strokeLinecap="round"
-                      />
-                    </svg>
-                    Genereer met Max
-                  </>
-                )}
-              </button>
             </div>
-            <Textarea
-              value={form.lesdoel}
-              onChange={(v) => setForm({ ...form, lesdoel: v })}
-              placeholder="Beschrijf wat leerlingen aan het einde van de les moeten kunnen of weten…"
-              rows={4}
-            />
-          </div>
-        </div>
+          )}
 
-        <div className="mt-8 flex justify-end">
-          <Button onClick={onNext} disabled={!canNext}>
-            Volgende stap
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M6 3l5 5-5 5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </Button>
-        </div>
+          <div className="flex-1 overflow-hidden">
+            {appStep === 'details' && (
+              <LesDetailsTab
+                educatieNiveau={educatieNiveau} setEducatieNiveau={setEducatieNiveau}
+                educatieSubNiveau={educatieSubNiveau} setEducatieSubNiveau={setEducatieSubNiveau}
+                educatieSubSubNiveau={educatieSubSubNiveau} setEducatieSubSubNiveau={setEducatieSubSubNiveau}
+                customEducation={customEducation} setCustomEducation={setCustomEducation}
+                customSubLevel={customSubLevel} setCustomSubLevel={setCustomSubLevel}
+                customSubSubLevel={customSubSubLevel} setCustomSubSubLevel={setCustomSubSubLevel}
+                onderwerp={onderwerp} setOnderwerp={setOnderwerp}
+                lesdoel={lesdoel} setLesdoel={setLesdoel}
+                referentieNiveau={referentieNiveau} setReferentieNiveau={setReferentieNiveau}
+                kwalificatieEnabled={kwalificatieEnabled} setKwalificatieEnabled={setKwalificatieEnabled}
+                taxonomieEnabled={taxonomieEnabled} setTaxonomieEnabled={setTaxonomieEnabled}
+                selectedTaxonomie={selectedTaxonomie} setSelectedTaxonomie={setSelectedTaxonomie}
+                selectedTaxNiveau={selectedTaxNiveau} setSelectedTaxNiveau={setSelectedTaxNiveau}
+                isValid={isDetailsValid} onSave={handleSaveDetails}
+              />
+            )}
+            {appStep === 'authoring' && activeTab === 'lesplan' && (
+              <LesplanTab lesduur={lesduur} setLesduur={setLesduur}
+                verwerkingOpdracht={VERWERKING_OPDRACHT}
+                lesdoel={activeLesdoel} condition={condition}
+                onNext={() => setActiveTab('lesoverzicht')}
+              />
+            )}
+            {appStep === 'authoring' && activeTab === 'lesoverzicht' && (
+              <LesoverzichtTab lessonOutline={lessonOutline} setLessonOutline={setLessonOutline}
+                lesdoel={activeLesdoel} condition={condition}
+                onPrev={() => setActiveTab('lesplan')}
+                onNext={() => setActiveTab('les')}
+              />
+            )}
+            {appStep === 'authoring' && activeTab === 'les' && (
+              <LesTab lesText={lesText} setLesText={setLesText}
+                lesdoel={activeLesdoel} condition={condition}
+                onPrev={() => setActiveTab('lesoverzicht')}
+                onNext={() => setActiveTab('voorvertoning')}
+              />
+            )}
+            {appStep === 'authoring' && activeTab === 'voorvertoning' && (
+              <VoorvertoningTab lesText={lesText} lesdoel={activeLesdoel}
+                condition={condition}
+                onPrev={() => setActiveTab('les')}
+                onShare={() => { setShareTab('students'); setShareModalOpen(true) }}
+              />
+            )}
+          </div>
+        </main>
       </div>
 
-      {/* Chat sidebar */}
-      <div className="hidden lg:flex w-80 flex-col border-l">
-        <ChatSidebar messages={chatMessages} onSend={onChatSend} isTyping={isTyping} />
-      </div>
-    </div>
-  )
-}
-
-// ─── STEP 2: Lesplan ─────────────────────────────────────────────────────────
-function Step2Plan({
-  form,
-  onNext,
-  onPrev,
-  chatMessages,
-  onChatSend,
-  isTyping,
-}: {
-  form: LessonForm
-  onNext: () => void
-  onPrev: () => void
-  chatMessages: ChatMessage[]
-  onChatSend: (msg: string) => void
-  isTyping: boolean
-}) {
-  // Parse LESPLAN_INTRO into phases for display
-  const phases = [
-    { title: "Introductie (10 min)", icon: "🚀", color: "#EFF9F9", border: TEAL },
-    { title: "Instructie (15 min)", icon: "📚", color: "#FFF5F8", border: PINK },
-    { title: "Verwerking (15 min)", icon: "🔧", color: "#FFF8EC", border: "#F9703D" },
-    { title: "Afronding (5 min)", icon: "✅", color: "#F0FFF4", border: "#22c55e" },
-  ]
-
-  const descriptions = [
-    "Activeer voorkennis met een korte poll: "Wat weet jij al over klimaat?" Bespreek de uitkomsten klassikaal.",
-    "Leg de broeikaswerking uit aan de hand van een visueel model. Focus op CO₂ en methaan als belangrijkste broeikasgassen.",
-    "Leerlingen werken in tweetallen aan een opdracht: rangschik vijf menselijke activiteiten op klimaatimpact en onderbouw de keuze.",
-    "Plenaire nabespreking. Elke leerling schrijft één ding op dat ze vandaag nieuw hebben geleerd (exit ticket).",
-  ]
-
-  return (
-    <div className="flex h-[calc(100vh-5.5rem)] gap-0">
-      <div className="flex-1 overflow-y-auto p-8 pb-32">
-        <MetroLine step={2} />
-        <h1 className="text-2xl font-bold mb-1" style={{ fontFamily: "Montserrat, sans-serif" }}>
-          Lesplan
-        </h1>
-        <p className="text-gray-500 text-sm mb-2">
-          Max heeft een lesplan gegenereerd op basis van jouw lesdetails.
-        </p>
-        {form.lesdoel && (
-          <div
-            className="text-sm rounded-lg p-3 mb-6 border-l-4"
-            style={{ background: "#EFF9F9", borderLeftColor: TEAL }}
-          >
-            <span className="font-medium text-gray-700">Lesdoel: </span>
-            <span className="text-gray-600">{form.lesdoel}</span>
-          </div>
-        )}
-
-        <div className="space-y-4">
-          {phases.map((p, i) => (
-            <div
-              key={i}
-              className="rounded-xl p-4 border-l-4"
-              style={{ background: p.color, borderLeftColor: p.border }}
-            >
-              <p className="font-semibold text-sm mb-1">
-                {p.icon} {p.title}
-              </p>
-              <p className="text-sm text-gray-600">{descriptions[i]}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-8 flex justify-between">
-          <Button variant="outline" onClick={onPrev}>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Vorige stap
-          </Button>
-          <Button onClick={onNext}>
-            Volgende stap
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M6 3l5 5-5 5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </Button>
-        </div>
-      </div>
-
-      <div className="hidden lg:flex w-80 flex-col border-l">
-        <ChatSidebar messages={chatMessages} onSend={onChatSend} isTyping={isTyping} />
-      </div>
-    </div>
-  )
-}
-
-// ─── STEP 3: Content building ─────────────────────────────────────────────────
-function Step3Content({
-  form,
-  onNext,
-  onPrev,
-  chatMessages,
-  onChatSend,
-  isTyping,
-}: {
-  form: LessonForm
-  onNext: () => void
-  onPrev: () => void
-  chatMessages: ChatMessage[]
-  onChatSend: (msg: string) => void
-  isTyping: boolean
-}) {
-  const elements = [
-    {
-      phase: "Introductie",
-      type: "Tekst",
-      preview:
-        "Kijk om je heen: wat zie jij in jouw dagelijks leven dat te maken heeft met klimaat? Denk aan het weer, vervoer, eten en energie.",
-    },
-    {
-      phase: "Instructie",
-      type: "Tekst",
-      preview:
-        "De aarde wordt omgeven door een laag broeikasgassen. Zonlicht komt erdoorheen, maar warmte kan moeilijker ontsnappen — net als in een broeikas.",
-    },
-    {
-      phase: "Verwerking",
-      type: "Opdracht",
-      preview:
-        "Rangschik de volgende activiteiten van meest naar minst klimaatimpact: vliegen, autorijden, vlees eten, streamen, verwarmen. Onderbouw je keuze.",
-    },
-    {
-      phase: "Afronding",
-      type: "Exit ticket",
-      preview:
-        "Schrijf in één zin op: wat heb je vandaag geleerd over klimaatverandering dat je nog niet wist?",
-    },
-  ]
-
-  return (
-    <div className="flex h-[calc(100vh-5.5rem)] gap-0">
-      <div className="flex-1 overflow-y-auto p-8 pb-32">
-        <MetroLine step={3} />
-        <h1 className="text-2xl font-bold mb-1" style={{ fontFamily: "Montserrat, sans-serif" }}>
-          Inhoud bouwen
-        </h1>
-        <p className="text-gray-500 text-sm mb-6">Max heeft lescontent gegenereerd. Je kunt dit bewerken.</p>
-
-        <div className="space-y-4">
-          {elements.map((el, i) => (
-            <div key={i} className="border rounded-xl p-4 bg-white shadow-sm">
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="text-xs px-2 py-0.5 rounded-full text-white font-medium"
-                    style={{ background: TEAL }}
-                  >
-                    {el.phase}
-                  </span>
-                  <span className="text-xs text-gray-500">{el.type}</span>
-                </div>
-                <button className="text-xs text-gray-400 hover:text-gray-600">Bewerken</button>
-              </div>
-              <p className="text-sm text-gray-700 leading-relaxed">{el.preview}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-8 flex justify-between">
-          <Button variant="outline" onClick={onPrev}>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Vorige stap
-          </Button>
-          <Button onClick={onNext}>
-            Voorvertoning bekijken
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M6 3l5 5-5 5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </Button>
-        </div>
-      </div>
-
-      <div className="hidden lg:flex w-80 flex-col border-l">
-        <ChatSidebar messages={chatMessages} onSend={onChatSend} isTyping={isTyping} />
-      </div>
-    </div>
-  )
-}
-
-// ─── STEP 4: Preview & Lock ───────────────────────────────────────────────────
-function Step4Preview({
-  form,
-  onPrev,
-  onLock,
-  isLocking,
-}: {
-  form: LessonForm
-  onPrev: () => void
-  onLock: () => void
-  isLocking: boolean
-}) {
-  const [showConfirm, setShowConfirm] = useState(false)
-
-  return (
-    <div className="flex-1 overflow-y-auto p-8 pb-32 max-w-3xl mx-auto">
-      <MetroLine step={4} />
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold" style={{ fontFamily: "Montserrat, sans-serif" }}>
-          Voorvertoning
-        </h1>
-        <button
-          onClick={() => setShowConfirm(true)}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-medium transition-all hover:opacity-90"
-          style={{ background: TEAL }}
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="6" width="12" height="8" rx="1" stroke="white" strokeWidth="1.4" />
-            <path d="M4 6V4a3 3 0 116 0v2" stroke="white" strokeWidth="1.4" strokeLinecap="round" />
-          </svg>
-          Zet les op slot
-        </button>
-      </div>
-
-      {/* Lesson preview card */}
-      <div className="bg-white rounded-xl border shadow-sm p-6 mb-6">
-        <div className="mb-4">
-          <h2 className="text-lg font-semibold text-gray-800">{form.onderwerp || "Geen onderwerp"}</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            {form.doelgroep} · {form.referentieNiveau} · {form.lesduur} min
-          </p>
-        </div>
-
-        {form.lesdoel && (
-          <div
-            className="rounded-lg p-3 mb-4 border-l-4 text-sm"
-            style={{ background: "#EFF9F9", borderLeftColor: TEAL }}
-          >
-            <span className="font-medium">Lesdoel:</span> {form.lesdoel}
-          </div>
-        )}
-
-        <div className="space-y-3 text-sm text-gray-700">
-          <div className="flex gap-3">
-            <span className="text-base">🚀</span>
-            <div>
-              <p className="font-medium">Introductie</p>
-              <p className="text-gray-500">
-                Poll over voorkennis klimaat → klassikale bespreking
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <span className="text-base">📚</span>
-            <div>
-              <p className="font-medium">Instructie</p>
-              <p className="text-gray-500">Uitleg broeikaswerking met visueel model</p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <span className="text-base">🔧</span>
-            <div>
-              <p className="font-medium">Verwerking</p>
-              <p className="text-gray-500">Tweetallen: rangschik klimaatactiviteiten</p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <span className="text-base">✅</span>
-            <div>
-              <p className="font-medium">Afronding</p>
-              <p className="text-gray-500">Exit ticket: wat heb je geleerd?</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex justify-start">
-        <Button variant="outline" onClick={onPrev}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          Vorige stap
-        </Button>
-      </div>
-
-      {/* Confirm modal */}
-      {showConfirm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6">
-            <div
-              className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4"
-              style={{ background: "#EFF9F9" }}
-            >
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                <rect x="3" y="11" width="18" height="11" rx="2" stroke={TEAL} strokeWidth="2" />
-                <path d="M7 11V7a5 5 0 0110 0v4" stroke={TEAL} strokeWidth="2" strokeLinecap="round" />
-              </svg>
-            </div>
-            <h3 className="text-lg font-bold text-center mb-2">Les op slot zetten?</h3>
-            <p className="text-sm text-gray-500 text-center mb-6">
-              De les wordt vergrendeld. Leerlingen kunnen de les daarna niet meer bewerken.
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowConfirm(false)}
-                className="flex-1 border border-gray-300 rounded-lg py-2 text-sm font-medium hover:bg-gray-50"
-              >
-                Annuleren
-              </button>
-              <button
-                onClick={() => {
-                  setShowConfirm(false)
-                  onLock()
-                }}
-                disabled={isLocking}
-                className="flex-1 rounded-lg py-2 text-sm font-medium text-white disabled:opacity-50"
-                style={{ background: TEAL }}
-              >
-                {isLocking ? "Vergrendelen…" : "Ja, vergrendel"}
-              </button>
-            </div>
-          </div>
-        </div>
+      {shareModalOpen && (
+        <ShareModal tab={shareTab} setTab={setShareTab}
+          onClose={() => setShareModalOpen(false)}
+          onDeelMetCollega={handleDeelMetCollega}
+          submitting={submitting} error={submitError}
+        />
       )}
     </div>
   )
 }
 
-// ─── Done screen ──────────────────────────────────────────────────────────────
-function DoneScreen({ form }: { form: LessonForm }) {
+// ─── LesDetails Tab ───────────────────────────────────────────────────────────
+const TAXONOMIES = [
+  { label: "Bloom's Taxonomie", levels: ['Kennis', 'Begrip', 'Toepassing', 'Analyse', 'Synthese', 'Evaluatie'] },
+  { label: 'Anderson & Krathwohl', levels: ['Onthouden', 'Begrijpen', 'Toepassen', 'Analyseren', 'Evalueren', 'Creëren'] },
+]
+
+function LesDetailsTab({ educatieNiveau, setEducatieNiveau, educatieSubNiveau, setEducatieSubNiveau,
+  educatieSubSubNiveau, setEducatieSubSubNiveau,
+  customEducation, setCustomEducation, customSubLevel, setCustomSubLevel,
+  customSubSubLevel, setCustomSubSubLevel,
+  onderwerp, setOnderwerp, lesdoel, setLesdoel, referentieNiveau, setReferentieNiveau,
+  kwalificatieEnabled, setKwalificatieEnabled, taxonomieEnabled, setTaxonomieEnabled,
+  selectedTaxonomie, setSelectedTaxonomie, selectedTaxNiveau, setSelectedTaxNiveau,
+  isValid, onSave }: any) {
+  const [activeTab, setActiveTab] = useState<'basis' | 'materiaal' | 'taal'>('basis')
+  const [showLesdoelInput, setShowLesdoelInput] = useState(!!lesdoel)
+  const [qualificationStandards, setQualificationStandards] = useState<Array<{ id: string; description: string; subject: string }>>([])
+
+  const wordCount = onderwerp.trim().split(/\s+/).filter(Boolean).length
+  const doelgroep = composeDoelgroep(
+    educatieNiveau,
+    educatieSubNiveau,
+    educatieSubSubNiveau,
+    customEducation,
+    customSubLevel,
+    customSubSubLevel
+  )
+  const progress = [!!doelgroep, wordCount >= 3, lesdoel.trim().length > 0].filter(Boolean).length
+  const currentMainLevel = educatieNiveau ? getEducationLevel(educatieNiveau) : undefined
+  const currentSubLevel = educatieNiveau && educatieSubNiveau
+    ? getEducationSubLevel(educatieNiveau, educatieSubNiveau)
+    : undefined
+  const disableGenerateLesdoel = onderwerp.trim().length > 0
+
+  const createQualificationId = () => {
+    if (typeof globalThis !== 'undefined' && globalThis.crypto && 'randomUUID' in globalThis.crypto) {
+      return globalThis.crypto.randomUUID()
+    }
+    return `standard-${Date.now()}-${Math.random()}`
+  }
+
+  const handleAddQualification = () => {
+    setQualificationStandards((prev) => [...prev, { id: createQualificationId(), description: '', subject: '' }])
+  }
+
+  const handleUpdateQualification = (id: string, field: 'description' | 'subject', value: string) => {
+    setQualificationStandards((prev) => prev.map((item) => (item.id === id ? { ...item, [field]: value } : item)))
+  }
+
+  const handleRemoveQualification = (id: string) => {
+    setQualificationStandards((prev) => prev.filter((item) => item.id !== id))
+  }
+
+  const completionText = !doelgroep ? 'Selecteer de doelgroep'
+    : wordCount < 3 ? 'Vul het onderwerp in (minimaal 3 woorden)'
+    : !lesdoel.trim() ? 'Vul het lesdoel in'
+    : 'Alle basisinformatie is ingevuld'
+
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-      <div
-        className="w-20 h-20 rounded-full flex items-center justify-center mb-6"
-        style={{ background: "#EFF9F9" }}
-      >
-        <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-          <path
-            d="M8 20l8 8L32 12"
-            stroke={TEAL}
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+    <div className="flex h-full overflow-hidden">
+      <div className="w-full lg:w-3/5 border-r bg-white overflow-y-auto p-4 md:p-8 lg:p-12 pb-32">
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold text-[#039B96] mb-1">Lesdetails bewerken</h2>
+          <p className="text-sm text-gray-500">Bewerk de basisinformatie van je les</p>
+        </div>
+
+        {/* Progress bar */}
+        <div className="w-full bg-gray-200 rounded-full h-1.5 mb-4">
+          <div className="bg-[#039B96] h-1.5 rounded-full transition-all duration-300" style={{ width: `${(progress / 3) * 100}%` }} />
+        </div>
+
+        {/* Sub-tabs */}
+        <div className="flex border-b border-gray-200 mb-6">
+          {(['basis', 'materiaal', 'taal'] as const).map((tab) => (
+            <button key={tab} onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === tab ? 'text-[#039B96] border-b-2 border-[#039B96]' : 'text-gray-500 hover:text-gray-700'
+              }`}>
+              {tab === 'basis' ? 'Basisinformatie' : tab === 'materiaal' ? 'Bronmateriaal' : 'Taalinstellingen'}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'basis' && (
+          <div className="space-y-6">
+            {/* Voor wie */}
+            <div className="border-t border-r border-b border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-6 space-y-4">
+              <label className="block text-base font-semibold text-gray-900">Voor wie is deze les?</label>
+              <div className="grid grid-cols-5 gap-2">
+                {EDUCATION_LEVELS.map(({ id, label }) => (
+                  <button key={id} type="button"
+                    onClick={() => {
+                      setEducatieNiveau(id)
+                      setEducatieSubNiveau('')
+                      setEducatieSubSubNiveau('')
+                      setCustomEducation('')
+                      setCustomSubLevel('')
+                      setCustomSubSubLevel('')
+                    }}
+                    className={`px-2 py-2 rounded-md border-2 font-medium text-sm transition-all ${
+                      educatieNiveau === id
+                        ? 'border-[#039B96] bg-[#039B96]/10 text-[#039B96]'
+                        : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
+                    }`}>{label}</button>
+                ))}
+              </div>
+
+              {educatieNiveau === 'Anders' && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Specificeer doelgroep</label>
+                  <input type="text" value={customEducation} onChange={(e) => setCustomEducation(e.target.value)}
+                    placeholder="bijv. Volwassenenonderwijs, Bedrijfstraining..."
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+                </div>
+              )}
+
+              {educatieNiveau && educatieNiveau !== 'Anders' && currentMainLevel?.subLevels?.length && !educatieSubNiveau && (
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                  <span className="text-sm text-blue-800">Kies nu het specifieke niveau</span>
+                </div>
+              )}
+
+              {currentMainLevel?.subLevels && educatieNiveau !== 'Anders' && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Specifiek niveau</label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {currentMainLevel.subLevels.map((subLevel) => (
+                      <button key={subLevel.id} type="button" onClick={() => {
+                        setEducatieSubNiveau(subLevel.id)
+                        setEducatieSubSubNiveau('')
+                        setCustomSubLevel('')
+                        setCustomSubSubLevel('')
+                      }}
+                        className={`px-2 py-2 rounded-md border-2 font-medium text-sm transition-all ${
+                          educatieSubNiveau === subLevel.id
+                            ? 'border-[#039B96] bg-[#039B96]/10 text-[#039B96]'
+                            : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
+                        }`}>{subLevel.label}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {educatieSubNiveau === 'anders' && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Specifiek niveau (anders)</label>
+                  <input type="text" value={customSubLevel} onChange={(e) => setCustomSubLevel(e.target.value)}
+                    placeholder="bijv. Speciaal onderwijs, Schakelklas..."
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+                </div>
+              )}
+
+              {currentSubLevel?.subSubLevels && educatieSubNiveau !== 'anders' && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Specifieke richting</label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {currentSubLevel.subSubLevels.map((subSubLevel) => (
+                      <button key={subSubLevel.id} type="button" onClick={() => {
+                        setEducatieSubSubNiveau(subSubLevel.id)
+                        setCustomSubSubLevel('')
+                      }}
+                        className={`px-2 py-2 rounded-md border-2 font-medium text-sm transition-all ${
+                          educatieSubSubNiveau === subSubLevel.id
+                            ? 'border-[#039B96] bg-[#039B96]/10 text-[#039B96]'
+                            : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
+                        }`}>{subSubLevel.label}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {educatieSubSubNiveau === 'anders' && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Specifieke richting (anders)</label>
+                  <input type="text" value={customSubSubLevel} onChange={(e) => setCustomSubSubLevel(e.target.value)}
+                    placeholder="bijv. Basis-Kader, LWOO..."
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+                </div>
+              )}
+            </div>
+
+            {/* Onderwerp */}
+            <div className="border-t border-r border-b border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-6 space-y-3">
+              <label className="block text-base font-semibold text-gray-900">Waar gaat de les over?</label>
+              <input type="text" value={onderwerp} onChange={(e) => setOnderwerp(e.target.value)}
+                placeholder="bijv. het herkennen van stijlfiguren in poëzie, snelheid, afstand en tijd berekenen"
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+              {onderwerp.trim().length > 0 && wordCount < 3 && (
+                <div className="flex items-center gap-2 text-sm text-red-600"><span>Vul minimaal 3 woorden in</span></div>
+              )}
+              {wordCount >= 3 && (
+                <div className="flex items-center gap-2 text-sm text-green-600"><span>✓</span><span>Onderwerp ingevuld</span></div>
+              )}
+            </div>
+
+            {/* Kwalificatie-eisen */}
+            <div className="border-t border-r border-b border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <label className="block text-base font-semibold text-gray-900">Kwalificatie-eisen</label>
+                  <p className="text-sm text-gray-500 mt-1">Officiële eindtermen of exameneisen uit syllabi, examenprogramma's of andere kwalificatiedocumenten.</p>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-sm text-gray-600">{kwalificatieEnabled ? 'Ingeschakeld' : 'Uitgeschakeld'}</span>
+                  <Toggle checked={kwalificatieEnabled} onChange={setKwalificatieEnabled} />
+                </div>
+              </div>
+
+              {kwalificatieEnabled && (
+                <Btn variant="default" className="w-full" onClick={handleAddQualification}>+ Kwalificatie-eis toevoegen</Btn>
+              )}
+
+              {kwalificatieEnabled && qualificationStandards.length === 0 && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <p className="text-sm text-gray-700">Nog geen kwalificatie-eisen toegevoegd. Gebruik de knop hierboven om de eerste toe te voegen.</p>
+                </div>
+              )}
+
+              {kwalificatieEnabled && qualificationStandards.length > 0 && (
+                <div className="space-y-4">
+                  {qualificationStandards.map((standard) => (
+                    <div key={standard.id} className="border border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-4 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <p className="text-base font-semibold text-gray-900 truncate">{standard.subject.trim() || 'Kwalificatie-eis'}</p>
+                        <Btn variant="secondary" className="text-red-600 hover:text-red-700" onClick={() => handleRemoveQualification(standard.id)}>
+                          Verwijderen
+                        </Btn>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-medium text-gray-700">Exacte kwalificatie-eis</label>
+                        <textarea
+                          value={standard.description}
+                          onChange={(e) => handleUpdateQualification(standard.id, 'description', e.target.value)}
+                          placeholder="Beschrijf exact wat deze kwalificatie-eis inhoudt."
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96] min-h-[120px]"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-medium text-gray-700">Vak / opleiding / domein / leergebied (optioneel)</label>
+                        <input
+                          type="text"
+                          value={standard.subject}
+                          onChange={(e) => handleUpdateQualification(standard.id, 'subject', e.target.value)}
+                          placeholder="bijv. Nederlands, Engels, Zorg & Welzijn"
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Leertaxonomie */}
+            <div className="border-t border-r border-b border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <label className="block text-base font-semibold text-gray-900">Leertaxonomie</label>
+                  <p className="text-sm text-gray-500 mt-1">Welke leertaxonomie en welk niveau wil je gebruiken als ontwerpkader?</p>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-sm text-gray-600">{taxonomieEnabled ? 'Ingeschakeld' : 'Uitgeschakeld'}</span>
+                  <Toggle checked={taxonomieEnabled} onChange={setTaxonomieEnabled} />
+                </div>
+              </div>
+              {taxonomieEnabled && (
+                <div className="space-y-4">
+                  {TAXONOMIES.map((tax) => (
+                    <div key={tax.label}>
+                      <p className="text-sm font-semibold text-gray-700 mb-2">{tax.label}</p>
+                      <div className="grid grid-cols-3 gap-2">
+                        {tax.levels.map((lvl) => (
+                          <button key={lvl} type="button"
+                            onClick={() => { setSelectedTaxonomie(tax.label); setSelectedTaxNiveau(lvl) }}
+                            className={`flex flex-col items-start px-3 py-2 rounded-md border text-xs font-medium transition-all ${
+                              selectedTaxNiveau === lvl && selectedTaxonomie === tax.label
+                                ? 'border-[#039B96] bg-[#039B96]/10 text-[#039B96]'
+                                : 'border-gray-300 bg-white text-gray-600 hover:border-gray-400'
+                            }`}>{lvl}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Lesdoel */}
+            <div className="border-t border-r border-b border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-6 space-y-4">
+              <label className="block text-base font-semibold text-gray-900">Wat moeten leerlingen kunnen na de les?</label>
+              <div className="flex gap-3">
+                <Btn
+                  variant="primary"
+                  disabled={disableGenerateLesdoel}
+                  className={`flex-1 ${disableGenerateLesdoel ? '!bg-gray-300 !text-gray-600 !from-gray-300 !to-gray-300 hover:!from-gray-300 hover:!to-gray-300' : ''}`}
+                  onClick={() => { setLesdoel(LESSON_LESDOEL); setShowLesdoelInput(true) }}>
+                  Laat AI een lesdoel maken
+                </Btn>
+                <Btn variant="secondary" className="flex-1" onClick={() => setShowLesdoelInput(true)}>
+                  Zelf invullen
+                </Btn>
+              </div>
+              {(showLesdoelInput || lesdoel) && (
+                <div className="space-y-2">
+                  <textarea value={lesdoel} onChange={(e) => setLesdoel(e.target.value.slice(0, 1000))}
+                    placeholder="bijv. Leerlingen kunnen de factoren die fotosynthese beïnvloeden uitleggen..."
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96] min-h-[80px]" />
+                  {lesdoel.trim().length > 0 && (
+                    <div className="flex items-center gap-2 text-sm text-green-600"><span>✓</span><span>Lesdoel ingevuld</span></div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'materiaal' && (
+          <div className="space-y-6">
+            <h3 className="text-sm font-semibold text-gray-900">Feitenkader</h3>
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <p className="text-sm text-gray-700">Feitenkader is onderdeel van Bronmateriaal. Voeg een feitenkader toe; Max toetst erop dat gegenereerd lesmateriaal niet conflicteert met de inhoud die hier staat.</p>
+            </div>
+            <Btn variant="default" className="w-full" onClick={() => {}}>+ Feitenkader toevoegen</Btn>
+          </div>
+        )}
+
+        {activeTab === 'taal' && (
+          <div className="space-y-6">
+            <div className="border-t border-r border-b border-gray-200 border-l-4 border-l-[#039B96] rounded-lg p-6 space-y-3">
+              <label className="block text-base font-semibold text-gray-900">Op welk taalniveau?</label>
+              <div className="grid grid-cols-4 gap-2">
+                {['1F', '2F', '3F', '4F'].map((n) => (
+                  <button key={n} type="button" onClick={() => setReferentieNiveau(n)}
+                    className={`px-2 py-2 rounded-md border-2 font-medium text-sm transition-all ${
+                      referentieNiveau === n ? 'border-[#039B96] bg-[#039B96]/10 text-[#039B96]' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
+                    }`}>{n}</button>
+                ))}
+              </div>
+              <div className="grid grid-cols-6 gap-2">
+                {['A1', 'A2', 'B1', 'B2', 'C1', 'C2'].map((n) => (
+                  <button key={n} type="button" onClick={() => setReferentieNiveau(n)}
+                    className={`px-2 py-2 rounded-md border-2 font-medium text-sm transition-all ${
+                      referentieNiveau === n ? 'border-[#039B96] bg-[#039B96]/10 text-[#039B96]' : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
+                    }`}>{n}</button>
+                ))}
+              </div>
+              {referentieNiveau && (
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                  <span className="text-sm text-blue-800">Taalniveau {referentieNiveau} geselecteerd</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="flex items-center justify-between w-full border-t border-gray-200 pt-4 mt-6">
+          <div className="text-sm text-gray-600">{completionText}</div>
+          <Btn variant="default" onClick={onSave} disabled={!isValid}>Opslaan</Btn>
+        </div>
       </div>
-      <h1 className="text-3xl font-bold mb-3" style={{ fontFamily: "Montserrat, sans-serif" }}>
-        Les op slot gezet!
-      </h1>
-      <p className="text-gray-500 max-w-md mb-2">
-        Bedankt voor het deelnemen aan dit onderzoek. Je les <strong>"{form.onderwerp}"</strong> is vergrendeld en
-        opgeslagen.
-      </p>
-      <p className="text-sm text-gray-400 mt-4">Je kunt dit venster nu sluiten.</p>
+
+      {/* Right panel */}
+      <div className="hidden lg:flex lg:flex-col lg:w-2/5 p-6 gap-4 bg-white overflow-y-auto">
+        <div className="shrink-0"><LesdoelCard lesdoel={lesdoel} /></div>
+        <div className="flex-1 border border-gray-200 rounded-lg bg-white flex flex-col overflow-hidden">
+          <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-r from-[#E13AA1] to-[#F63] flex items-center justify-center text-white text-xs font-bold shrink-0">M</div>
+            <span className="text-sm font-medium">Max</span>
+          </div>
+          <div className="p-4 flex gap-2 items-end">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-r from-[#E13AA1] to-[#F63] shrink-0 flex items-center justify-center text-white text-[10px] font-bold">M</div>
+            <div className="bg-[#FAFBFD] rounded-xl rounded-bl-none px-4 py-3 text-sm text-gray-700">
+              Hoi, ik ben Max, je AI-assistent. Vul de lesdetails in en vraag me om suggesties of hulp waar nodig.
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
 
-// ─── Main experiment orchestrator ────────────────────────────────────────────
-export default function ExperimentPage() {
-  const participantId = useRef(uuidv4())
-  const [step, setStep] = useState(1)
-  const [done, setDone] = useState(false)
-  const [isLocking, setIsLocking] = useState(false)
+// ─── Lesplan Tab ──────────────────────────────────────────────────────────────
+function LesplanTab({ lesduur, setLesduur, verwerkingOpdracht, lesdoel, condition, onNext }: any) {
+  const canNext = lesduur !== undefined && lesduur >= 10 && lesduur <= 300
+  return (
+    <div className="flex h-full overflow-hidden">
+      <div className="w-full lg:w-3/5 border-r bg-white overflow-y-auto p-4 md:p-8 lg:p-12 pb-32">
+        <MetroLine step={1} />
+        <NudgeBox condition={condition} tab="lesplan" />
+        <div className="space-y-6">
+          {/* Verwerkingsopdracht */}
+          <div className="border border-gray-200 p-6 rounded-lg relative">
+            <div className="mb-4">
+              <p className="font-bold text-base">Verwerkingsopdracht</p>
+              <p className="text-sm text-gray-500">Kies een opdracht voor deze fase</p>
+            </div>
+            <div className="border-2 border-[#039B96] bg-[#039B96]/5 rounded-lg px-4 py-3 flex items-center gap-3">
+              <div className="w-4 h-4 rounded-full border-2 border-[#039B96] flex items-center justify-center shrink-0">
+                <div className="w-2 h-2 rounded-full bg-[#039B96]" />
+              </div>
+              <p className="text-sm text-gray-700">{verwerkingOpdracht}</p>
+            </div>
+          </div>
 
-  const [form, setForm] = useState<LessonForm>({
-    onderwerp: "",
-    doelgroep: "",
-    referentieNiveau: "B1",
-    lesdoel: "",
-    lesduur: 45,
-  })
+          {/* Lesduur */}
+          <div className="border border-gray-200 p-6 rounded-lg relative">
+            <p className="font-bold text-base mb-1">Lesduur</p>
+            <p className="text-sm text-gray-500 mb-3">Hoe lang duurt de les? (in minuten)</p>
+            <input type="number" value={lesduur ?? ''} min={10} max={300}
+              onChange={(e) => { const v = e.target.value; if (v === '') { setLesduur(undefined); return }; const n = parseInt(v, 10); if (!isNaN(n)) setLesduur(n) }}
+              placeholder="bijv. 45"
+              className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+            {lesduur !== undefined && (lesduur < 10 || lesduur > 300) && (
+              <p className="text-xs text-red-500 mt-1">Lesduur moet tussen 10 en 300 minuten zijn</p>
+            )}
+          </div>
+        </div>
 
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    {
-      role: "assistant",
-      text: "Hoi! Ik ben Max, jouw AI-assistent. Ik help je bij het opbouwen van deze les. Stel gerust vragen of vraag om feedback!",
-    },
-  ])
-  const [isTyping, setIsTyping] = useState(false)
-  const [isGeneratingLesdoel, setIsGeneratingLesdoel] = useState(false)
-
-  // Track step changes
-  const track = async (event: string, extra?: object) => {
-    await submitToFormspree({
-      participant_id: participantId.current,
-      timestamp: new Date().toISOString(),
-      event,
-      onderwerp: form.onderwerp,
-      doelgroep: form.doelgroep,
-      referentieNiveau: form.referentieNiveau,
-      lesdoel: form.lesdoel,
-      lesduur: typeof form.lesduur === "number" ? form.lesduur : undefined,
-      step,
-      ...extra,
-    })
-  }
-
-  // Simulate typing delay for chat responses
-  const simulateResponse = (response: string, delay = 1200) => {
-    setIsTyping(true)
-    setTimeout(() => {
-      setIsTyping(false)
-      setChatMessages((prev) => [...prev, { role: "assistant", text: response }])
-    }, delay)
-  }
-
-  const handleChatSend = async (msg: string) => {
-    setChatMessages((prev) => [...prev, { role: "user", text: msg }])
-    await track("chat_message", { chat_message: msg })
-
-    // Pick the best predetermined response
-    const lower = msg.toLowerCase()
-    let response = CHAT_RESPONSES.default
-    if (lower.includes("lesdoel")) response = CHAT_RESPONSES.lesdoel
-    else if (lower.includes("structuur") || lower.includes("lesplan")) response = CHAT_RESPONSES.structuur
-    else if (lower.includes("inhoud") || lower.includes("tekst")) response = CHAT_RESPONSES.inhoud
-
-    simulateResponse(response)
-  }
-
-  const handleGenerateLesdoel = async () => {
-    setIsGeneratingLesdoel(true)
-    await track("generate_lesdoel")
-    setTimeout(() => {
-      setForm((f) => ({ ...f, lesdoel: LESDOEL_SUGGESTION }))
-      setIsGeneratingLesdoel(false)
-      simulateResponse(
-        "Ik heb een lesdoel gegenereerd op basis van het onderwerp en de doelgroep. Pas het gerust aan als je iets anders in gedachten hebt!"
-      )
-    }, 1800)
-  }
-
-  const goToStep = async (newStep: number) => {
-    await track(`step_${newStep}`)
-    setStep(newStep)
-    window.scrollTo({ top: 0, behavior: "smooth" })
-  }
-
-  const handleLock = async () => {
-    setIsLocking(true)
-    await track("lesson_locked", { locked: true })
-    setTimeout(() => {
-      setIsLocking(false)
-      setDone(true)
-    }, 1200)
-  }
-
-  if (done) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col">
-        <nav className="h-14 border-b bg-white flex items-center px-6 gap-3">
-          <img src="/logo.svg" alt="Max" className="h-7" />
-        </nav>
-        <DoneScreen form={form} />
+        <div className="h-16 w-full relative mt-8">
+          <Btn variant="default" onClick={onNext} disabled={!canNext} className="float-right">
+            Volgende <ChevronRight />
+          </Btn>
+        </div>
       </div>
-    )
-  }
+      <ChatPanel lesdoel={lesdoel} />
+    </div>
+  )
+}
+
+// ─── Lesoverzicht Tab ─────────────────────────────────────────────────────────
+type OutlinePhase = 'introductie' | 'instructie' | 'verwerking' | 'afronding'
+const PHASE_TITLES: Record<OutlinePhase, string> = { introductie: 'Introductie', instructie: 'Instructie', verwerking: 'Verwerking', afronding: 'Afronding' }
+const PHASE_DESCS:  Record<OutlinePhase, string> = {
+  introductie: 'Activeer voorkennis en wek interesse',
+  instructie:  'Leg nieuwe kennis en concepten uit',
+  verwerking:  'Oefen met de nieuwe kennis',
+  afronding:   'Reflecteer en evalueer',
+}
+
+function LesoverzichtTab({ lessonOutline, setLessonOutline, lesdoel, condition, onPrev, onNext }: any) {
+  const toggle = (phase: OutlinePhase) =>
+    setLessonOutline((p: any) => ({ ...p, [phase]: { ...p[phase], active: !p[phase].active } }))
+  const updateTopic = (phase: OutlinePhase, id: string, title: string) =>
+    setLessonOutline((p: any) => ({ ...p, [phase]: { ...p[phase], topics: p[phase].topics.map((t: any) => t.id === id ? { ...t, title } : t) } }))
+  const deleteTopic = (phase: OutlinePhase, id: string) =>
+    setLessonOutline((p: any) => ({ ...p, [phase]: { ...p[phase], topics: p[phase].topics.filter((t: any) => t.id !== id) } }))
+  const addTopic = (phase: OutlinePhase) =>
+    setLessonOutline((p: any) => ({ ...p, [phase]: { ...p[phase], topics: [...p[phase].topics, { id: Date.now().toString(), title: 'Nieuw onderwerp' }] } }))
+  const moveTopic = (phase: OutlinePhase, idx: number, dir: 'up' | 'down') =>
+    setLessonOutline((p: any) => {
+      const topics = [...p[phase].topics]; const j = dir === 'up' ? idx - 1 : idx + 1
+      if (j < 0 || j >= topics.length) return p;
+      [topics[idx], topics[j]] = [topics[j], topics[idx]]
+      return { ...p, [phase]: { ...p[phase], topics } }
+    })
+
+  const hasActive = (Object.keys(PHASE_TITLES) as OutlinePhase[]).some((k) => lessonOutline[k].active)
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Nav */}
-      <nav className="h-14 border-b bg-white flex items-center px-6 gap-3 z-10">
-        <img src="/logo.svg" alt="Max" className="h-7" />
-        <div className="flex-1" />
-        <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded">Experiment</span>
-      </nav>
+    <div className="flex h-full overflow-hidden">
+      <div className="w-full lg:w-3/5 border-r bg-white overflow-y-auto p-4 md:p-8 lg:p-12 pb-32">
+        <MetroLine step={2} />
+        <h1 className="text-3xl mb-1">Lesoverzicht</h1>
+        <div className="text-sm text-gray-500 mb-6">
+          <div className="font-bold">Structureer je les</div>
+          <p>Bepaal de opbouw van je les door de onderwerpen per fase te ordenen. Gebruik de knoppen om onderwerpen toe te voegen, te verwijderen of te verplaatsen.</p>
+        </div>
+        <NudgeBox condition={condition} tab="lesoverzicht" />
 
-      {/* Content */}
-      <div className="flex-1">
-        {step === 1 && (
-          <Step1Setup
-            form={form}
-            setForm={setForm}
-            onNext={() => goToStep(2)}
-            chatMessages={chatMessages}
-            onChatSend={handleChatSend}
-            isTyping={isTyping}
-            onGenerateLesdoel={handleGenerateLesdoel}
-            isGeneratingLesdoel={isGeneratingLesdoel}
-          />
-        )}
-        {step === 2 && (
-          <Step2Plan
-            form={form}
-            onNext={() => goToStep(3)}
-            onPrev={() => goToStep(1)}
-            chatMessages={chatMessages}
-            onChatSend={handleChatSend}
-            isTyping={isTyping}
-          />
-        )}
-        {step === 3 && (
-          <Step3Content
-            form={form}
-            onNext={() => goToStep(4)}
-            onPrev={() => goToStep(2)}
-            chatMessages={chatMessages}
-            onChatSend={handleChatSend}
-            isTyping={isTyping}
-          />
-        )}
-        {step === 4 && (
-          <Step4Preview
-            form={form}
-            onPrev={() => goToStep(3)}
-            onLock={handleLock}
-            isLocking={isLocking}
-          />
-        )}
+        <div className="space-y-6">
+          {(Object.keys(PHASE_TITLES) as OutlinePhase[]).map((phase) => {
+            const { active, topics } = lessonOutline[phase]
+            return (
+              <div key={phase} className={`rounded-lg border-2 ${active ? 'border-gray-900' : 'border-gray-200 bg-gray-50/50'}`}>
+                <div className="p-6">
+                  <div className="block md:flex items-center justify-between">
+                    <div>
+                      <h3 className={`text-xl font-semibold leading-none tracking-tight ${!active ? 'text-gray-400' : ''}`}>{PHASE_TITLES[phase]}</h3>
+                      <p className="text-sm text-gray-500 mt-1.5 mb-2 md:mb-0">{PHASE_DESCS[phase]}</p>
+                    </div>
+                    <div className="flex rounded-md bg-gray-100 p-0.5 shrink-0">
+                      <button onClick={() => !active && toggle(phase)}
+                        className={`rounded px-3 py-1.5 text-sm transition-colors ${active ? 'bg-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-900'}`}>
+                        Gebruiken
+                      </button>
+                      <button onClick={() => active && toggle(phase)}
+                        className={`rounded px-3 py-1.5 text-sm transition-colors ${!active ? 'bg-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-900'}`}>
+                        Niet gebruiken
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="px-6 pb-6">
+                  {active ? (
+                    <div className="space-y-3">
+                      {topics.map((topic: any, idx: number) => (
+                        <div key={topic.id} className="rounded-lg border bg-white p-4">
+                          <div className="flex items-center gap-2">
+                            <input defaultValue={topic.title}
+                              onBlur={(e) => updateTopic(phase, topic.id, e.target.value)}
+                              className="flex-1 border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+                            <button onClick={() => moveTopic(phase, idx, 'up')} disabled={idx === 0}
+                              className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-30 text-gray-500">
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
+                            </button>
+                            <button onClick={() => moveTopic(phase, idx, 'down')} disabled={idx === topics.length - 1}
+                              className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-30 text-gray-500">
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                            </button>
+                            <button onClick={() => deleteTopic(phase, topic.id)}
+                              className="p-1.5 rounded hover:bg-red-50 text-red-400 hover:text-red-600">
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      <button onClick={() => addTopic(phase)}
+                        className="w-full border border-gray-200 rounded-lg py-2 text-sm text-gray-500 hover:bg-gray-50 flex items-center justify-center gap-1 bg-white">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+                        Onderwerp toevoegen
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-400 italic">Deze fase wordt niet gebruikt in de les</p>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="h-16 w-full relative mt-8">
+          <Btn variant="outline" onClick={onPrev} className="float-left"><ChevronLeft /> Vorige</Btn>
+          <Btn variant="default" onClick={onNext} disabled={!hasActive} className="float-right">Volgende <ChevronRight /></Btn>
+        </div>
+      </div>
+      <ChatPanel lesdoel={lesdoel} />
+    </div>
+  )
+}
+
+// ─── Les Tab ──────────────────────────────────────────────────────────────────
+function LessonElementBlock({ content, onUpdate, onDelete, onMoveUp, onMoveDown, isFirst, isLast }: {
+  content: string; onUpdate: (v: string) => void; onDelete: () => void
+  onMoveUp: () => void; onMoveDown: () => void; isFirst: boolean; isLast: boolean
+}) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState(content)
+  const [collapsed, setCollapsed] = useState(false)
+
+  return (
+    <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2 bg-[#FAFBFD] border-b border-gray-100">
+        <div className="flex items-center gap-2">
+          <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+          <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Tekstblok</span>
+        </div>
+        <div className="flex items-center gap-0.5">
+          <button onClick={onMoveUp} disabled={isFirst} title="Omhoog"
+            className="p-1.5 hover:bg-gray-200 rounded disabled:opacity-30 text-gray-500">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
+          </button>
+          <button onClick={onMoveDown} disabled={isLast} title="Omlaag"
+            className="p-1.5 hover:bg-gray-200 rounded disabled:opacity-30 text-gray-500">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+          </button>
+          <button onClick={() => setCollapsed(!collapsed)} title="Inklappen"
+            className="p-1.5 hover:bg-gray-200 rounded text-gray-500">
+            <svg className={`w-3.5 h-3.5 transition-transform ${collapsed ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
+          </button>
+          <button onClick={onDelete} title="Verwijderen"
+            className="p-1.5 hover:bg-red-50 rounded text-red-400 hover:text-red-600">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+          </button>
+        </div>
+      </div>
+      {!collapsed && (
+        editing ? (
+          <textarea value={val} onChange={(e) => setVal(e.target.value)}
+            onBlur={() => { setEditing(false); onUpdate(val) }}
+            autoFocus
+            className="w-full p-4 text-sm text-gray-800 min-h-[80px] resize-y focus:outline-none focus:ring-1 focus:ring-[#039B96] border-0" />
+        ) : (
+          <div onClick={() => setEditing(true)}
+            className="p-4 text-sm text-gray-800 cursor-text min-h-[50px] whitespace-pre-wrap hover:bg-gray-50/50 leading-relaxed">
+            {val || <span className="text-gray-400 italic">Klik om te bewerken...</span>}
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
+function LesTab({ lesText, setLesText, lesdoel, condition, onPrev, onNext }: any) {
+  const [blocks, setBlocks] = useState<string[]>(() =>
+    lesText.split('\n\n').filter((b: string) => b.trim().length > 0)
+  )
+
+  const sync = (nb: string[]) => { setBlocks(nb); setLesText(nb.join('\n\n')) }
+  const updateBlock = (i: number, v: string) => { const nb = [...blocks]; nb[i] = v; sync(nb) }
+  const deleteBlock = (i: number) => sync(blocks.filter((_: any, idx: number) => idx !== i))
+  const moveBlock = (i: number, dir: 'up' | 'down') => {
+    const nb = [...blocks]; const j = dir === 'up' ? i - 1 : i + 1
+    if (j < 0 || j >= nb.length) return;
+    [nb[i], nb[j]] = [nb[j], nb[i]]; sync(nb)
+  }
+  const addBlock = () => sync([...blocks, ''])
+
+  // Determine phase label per block
+  const phaseLabel = (i: number) => {
+    const r = i / Math.max(blocks.length - 1, 1)
+    if (r < 0.15) return 'Introductie'
+    if (r < 0.55) return 'Instructie'
+    if (r < 0.82) return 'Verwerking'
+    return 'Afronding'
+  }
+  const phaseColors: Record<string, string> = {
+    Introductie: 'text-blue-600',
+    Instructie: 'text-purple-600',
+    Verwerking: 'text-orange-600',
+    Afronding: 'text-[#039B96]',
+  }
+
+  let prevPhase = ''
+  return (
+    <div className="flex h-full overflow-hidden">
+      <div className="w-full lg:w-3/5 border-r bg-white overflow-y-auto p-4 md:p-8 lg:p-12 pb-32">
+        <MetroLine step={3} />
+        <h1 className="text-3xl mb-4">Les</h1>
+        <NudgeBox condition={condition} tab="les" />
+
+        <div className="space-y-3">
+          {blocks.map((block: string, i: number) => {
+            const phase = phaseLabel(i)
+            const showHeader = phase !== prevPhase; prevPhase = phase
+            return (
+              <div key={i}>
+                {showHeader && (
+                  <div className="flex items-center gap-3 mb-2 mt-5 first:mt-0">
+                    <span className={`text-xs font-bold uppercase tracking-wider ${phaseColors[phase]}`}>{phase}</span>
+                    <div className="flex-1 h-px bg-gray-100" />
+                  </div>
+                )}
+                <LessonElementBlock
+                  content={block} onUpdate={(v: string) => updateBlock(i, v)}
+                  onDelete={() => deleteBlock(i)}
+                  onMoveUp={() => moveBlock(i, 'up')} onMoveDown={() => moveBlock(i, 'down')}
+                  isFirst={i === 0} isLast={i === blocks.length - 1}
+                />
+              </div>
+            )
+          })}
+
+          <div className="flex gap-2 mt-4">
+            <button onClick={addBlock}
+              className="flex items-center gap-2 px-4 py-2 border border-dashed border-gray-300 rounded-lg text-sm text-gray-500 hover:bg-gray-50 transition-colors">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+              Tekstblok toevoegen
+            </button>
+          </div>
+        </div>
+
+        <div className="h-16 w-full relative mt-8 flex justify-between">
+          <Btn variant="outline" onClick={onPrev}><ChevronLeft /> Vorige</Btn>
+          <Btn variant="default" onClick={onNext}>Volgende <ChevronRight /></Btn>
+        </div>
+      </div>
+      <ChatPanel lesdoel={lesdoel} />
+    </div>
+  )
+}
+
+// ─── Voorvertoning Tab ────────────────────────────────────────────────────────
+function renderMd(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = []
+  let k = 0
+  for (const line of text.split('\n')) {
+    if (!line.trim()) { nodes.push(<div key={k++} className="h-2" />); continue }
+    if (line.startsWith('## ')) { nodes.push(<h2 key={k++} className="text-xl font-bold text-gray-900 mt-8 mb-3 first:mt-0">{line.slice(3)}</h2>); continue }
+    if (line.startsWith('### ')) { nodes.push(<h3 key={k++} className="text-base font-semibold text-gray-800 mt-5 mb-2">{line.slice(4)}</h3>); continue }
+    const md = line.replace(/\*\*(.+?)\*\*/g, (_, m) => `<strong>${m}</strong>`)
+    if (line.match(/^\d+\. /)) { nodes.push(<li key={k++} className="ml-5 list-decimal text-sm text-gray-700 mb-1" dangerouslySetInnerHTML={{ __html: md.replace(/^\d+\. /, '') }} />); continue }
+    if (line.startsWith('- ')) { nodes.push(<li key={k++} className="ml-5 list-disc text-sm text-gray-700 mb-1" dangerouslySetInnerHTML={{ __html: md.slice(2) }} />); continue }
+    nodes.push(<p key={k++} className="text-sm text-gray-700 mb-2" dangerouslySetInnerHTML={{ __html: md }} />)
+  }
+  return nodes
+}
+
+function VoorvertoningTab({ lesText, lesdoel, condition, onPrev, onShare }: any) {
+  return (
+    <div className="flex h-full overflow-hidden">
+      <div className="w-full lg:w-3/5 border-r bg-white overflow-y-auto p-4 md:p-8 lg:p-12 pb-32">
+        <MetroLine step={4} />
+        {/* Mobile lesdoel */}
+        <div className="lg:hidden mb-6"><LesdoelCard lesdoel={lesdoel} /></div>
+        <NudgeBox condition={condition} tab="voorvertoning" />
+        <div className="h-16 w-full relative mt-2">
+          <h1 className="text-3xl float-left">Voorvertoning</h1>
+          <Btn variant="primary" className="float-right" onClick={onShare}>
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
+            Deel deze les
+          </Btn>
+        </div>
+        <div className="mt-4">
+          {renderMd(lesText)}
+        </div>
+        <div className="h-16 w-full relative mt-8 flex justify-between">
+          <Btn variant="outline" onClick={onPrev}><ChevronLeft /> Vorige</Btn>
+          <Btn variant="primary" onClick={onShare}>
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
+            Deel deze les
+          </Btn>
+        </div>
+      </div>
+      <div className="hidden lg:block lg:w-2/5 p-6 bg-white">
+        <LesdoelCard lesdoel={lesdoel} />
       </div>
     </div>
   )
+}
+
+// ─── Nudge Box ────────────────────────────────────────────────────────────────
+function NudgeBox({ condition, tab }: { condition: string; tab: string }) {
+  if (condition === 'baseline') return null
+  if (condition === 'nudge_accuracy' && tab === 'les') return (
+    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4 flex gap-3">
+      <span className="text-blue-500 text-lg">🔍</span>
+      <div>
+        <p className="text-sm font-semibold text-blue-900">Controleer de inhoud nauwkeurig</p>
+        <p className="text-sm text-blue-700">AI-gegenereerde tekst kan fouten bevatten. Lees de inhoud zorgvuldig door voordat je deelt.</p>
+      </div>
+    </div>
+  )
+  if (condition === 'nudge_trust' && tab === 'les') return (
+    <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4 flex gap-3">
+      <span className="text-green-500 text-lg">✅</span>
+      <div>
+        <p className="text-sm font-semibold text-green-900">Kwaliteitsgecontroleerde inhoud</p>
+        <p className="text-sm text-green-700">Deze les is gegenereerd met geavanceerde AI en doorloopt een kwaliteitscheck.</p>
+      </div>
+    </div>
+  )
+  return null
+}
+
+// ─── Share Modal — matches MaxAssist ShareModal exactly ───────────────────────
+function ShareModal({ tab, setTab, onClose, onDeelMetCollega, submitting, error }: {
+  tab: 'students' | 'colleagues'; setTab: (t: 'students' | 'colleagues') => void
+  onClose: () => void; onDeelMetCollega: () => void
+  submitting: boolean; error: string | null
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="overflow-y-auto flex-1 -mx-0 px-0">
+          <div className="p-6">
+            <h2 className="text-lg font-bold text-gray-900 mb-4">Kies een deelmethode</h2>
+
+            {/* Tabs matching original */}
+            <div className="flex w-full mb-4">
+              <button onClick={() => setTab('students')}
+                className={`flex-1 py-2 text-sm font-medium transition-colors rounded-l-md ${tab === 'students' ? 'bg-[#F71E63] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                Deel met doelgroep
+              </button>
+              <button onClick={() => setTab('colleagues')}
+                className={`flex-1 py-2 text-sm font-medium transition-colors rounded-r-md ${tab === 'colleagues' ? 'bg-[#F71E63] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                Deel met collega's
+              </button>
+            </div>
+
+            {tab === 'students' && (
+              <div className="text-sm text-gray-700 space-y-4">
+                <p>Selecteer hoe je de les wilt delen met je leerlingen.</p>
+                <div>
+                  <p className="font-bold mt-2 mb-1">PDF download</p>
+                  <p className="text-gray-500 mb-2">Deel als downloadbaar PDF bestand</p>
+                  <Btn variant="default" className="w-full" onClick={() => {}}>
+                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                    Download PDF bestand
+                  </Btn>
+                </div>
+                <div>
+                  <p className="font-bold mt-4 mb-1">Link met lescode</p>
+                  <p className="text-gray-500 mb-2">Zet de les op slot zodat je de link kan delen.</p>
+                  <Btn variant="default" className="w-full" onClick={() => {}}>
+                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                    Zet les op slot
+                  </Btn>
+                </div>
+                <div className="flex justify-end pt-2">
+                  <Btn variant="secondary" onClick={onClose}>Annuleren</Btn>
+                </div>
+              </div>
+            )}
+
+            {tab === 'colleagues' && (
+              <div>
+                <p className="text-sm text-gray-600 mb-4">Deel de les <b>De fotosynthese</b> met je collega's.</p>
+                <div className="flex gap-2 mb-5">
+                  <input type="email" placeholder="E-mailadres"
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+                  <Btn variant="default" onClick={() => {}}>Toevoegen</Btn>
+                </div>
+                <p className="text-sm text-gray-400 mb-4">Voeg collega's toe om deze les met hen te delen.</p>
+
+                {error && (
+                  <div className="bg-red-50 border border-red-200 rounded-md p-3 mb-4 text-sm text-red-700">{error}</div>
+                )}
+
+                <div className="flex justify-end gap-3 pt-3 border-t border-gray-100 mt-2">
+                  <Btn variant="secondary" onClick={onClose}>Annuleren</Btn>
+                  <Btn variant="primary" onClick={onDeelMetCollega} disabled={submitting}>
+                    {submitting ? (
+                      <svg className="animate-spin w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 22 6.477 22 12h-4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                    )}
+                    Delen met collega's
+                  </Btn>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Completion Screen ────────────────────────────────────────────────────────
+function CompletionScreen() {
+  return (
+    <div className="min-h-screen bg-[#FAFBFD] flex items-center justify-center p-6">
+      <div className="bg-white rounded-2xl shadow-lg max-w-md w-full p-10 text-center">
+        <div className="w-16 h-16 bg-[#039B96]/10 rounded-full flex items-center justify-center mx-auto mb-6">
+          <svg className="w-8 h-8 text-[#039B96]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+        <h1 className="text-2xl font-bold text-gray-900 mb-3">Bedankt voor je deelname!</h1>
+        <p className="text-gray-600 mb-6">Je hebt de les succesvol gedeeld. Ga nu terug naar Qualtrics om de vragenlijst af te ronden.</p>
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <p className="text-sm font-semibold text-amber-900 mb-1">📋 Volgende stap</p>
+          <p className="text-sm text-amber-700">Keer terug naar het Qualtrics-tabblad in je browser om de evaluatie in te vullen.</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Tiny icon helpers ────────────────────────────────────────────────────────
+function ChevronRight() {
+  return <svg className="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+}
+function ChevronLeft() {
+  return <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
 }
