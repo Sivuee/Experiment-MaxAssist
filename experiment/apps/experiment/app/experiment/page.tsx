@@ -1,10 +1,9 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
-  EXPERIMENT_TEXT, BASELINE_TEXT, ERRORS, N_ERRORS, LESSON_LESDOEL
+  EXPERIMENT_TEXT, LESSON_LESDOEL
 } from '@/lib/experiment-content'
-import { levenshtein, countCorrectedErrors } from '@/lib/metrics'
 
 // ─── Education levels ─────────────────────────────────────────────────────────
 const EDU_LEVELS = [
@@ -91,37 +90,42 @@ function LesdoelCard({ lesdoel }: { lesdoel: string }) {
   )
 }
 
+// MetroLine — exact original implementation using before: pseudo-classes
 function MetroLine({ step }: { step: number }) {
   const items = [
     { id: 1, label: 'Lesplan' }, { id: 2, label: 'Lesoverzicht' },
     { id: 3, label: 'Les' }, { id: 4, label: 'Voorvertoning' },
-  ]
+  ].map(item => ({
+    ...item,
+    active: item.id === step,
+    completed: item.id < step,
+  }))
+
   return (
-    <div className="mt-2 md:mt-0">
-      <div className="relative p-5">
+    <div id="metro-line">
+      <div className="relative p-5 mt-6 md:mt-0">
         <div className="ml-8 mr-10 absolute top-0 left-0 right-0 h-[6px] bg-[#FAFBFD] z-0" />
         <ul className="flex justify-between list-none p-0 m-0">
-          {items.map(({ id, label }) => {
-            const active = id === step, completed = id < step
+          {items.map(({ id, label, active, completed }) => {
+            const circleClass = completed
+              ? "before:border-[#039B96] before:bg-[#039B96]"
+              : active
+                ? "before:border-[#F9703D] before:bg-white"
+                : "before:border-slate-100 before:bg-slate-300"
             return (
-              <li key={id} className="relative flex flex-col items-center">
-                <span className={[
-                  'absolute -top-7 left-1/2 -translate-x-1/2 w-6 h-6 border-8 rounded-full flex items-center justify-center',
-                  completed ? 'border-[#039B96] bg-[#039B96]' : active ? 'border-[#F9703D] bg-white' : 'border-slate-100 bg-slate-300',
-                ].join(' ')}>
-                  {completed && (
-                    <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                    </svg>
-                  )}
-                </span>
+              <li key={id} className={`relative flex flex-col items-center before:content-[''] before:absolute before:-top-7 before:left-1/2 before:transform before:-translate-x-1/2 before:w-6 before:h-6 before:border-8 before:rounded-full ${circleClass}`}>
+                {completed && (
+                  <svg className="text-white absolute -top-6 w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
                 <span className={`mt-2 text-xs ${active ? 'font-bold' : 'text-gray-400'}`}>{label}</span>
               </li>
             )
           })}
         </ul>
       </div>
-      <hr className="mt-3 mb-7 border-gray-200" />
+      <hr className="mt-3 mb-7" />
     </div>
   )
 }
@@ -294,14 +298,10 @@ export default function ExperimentPage() {
   // Share modal
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [shareTab, setShareTab]             = useState<'students' | 'colleagues'>('students')
-  const [submitting, setSubmitting]         = useState(false)
-  const [submitError, setSubmitError]       = useState<string | null>(null)
-  const [participantId, setParticipantId]   = useState('unknown')
   const [condition, setCondition]           = useState('baseline')
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search)
-    setParticipantId(p.get('pid') || 'unknown')
     setCondition(p.get('condition') || 'baseline')
   }, [])
 
@@ -334,27 +334,9 @@ export default function ExperimentPage() {
   }
 
   const handleDeelMetCollega = async () => {
-    setSubmitting(true); setSubmitError(null)
-    const { corrected, uncorrected } = countCorrectedErrors(lesText, ERRORS)
-    const lev = levenshtein(lesText, BASELINE_TEXT)
-    try {
-      const res = await fetch('https://formspree.io/f/YOUR_FORMSPREE_ID', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          participant_id: participantId, condition,
-          error_correction_rate: corrected.length / N_ERRORS,
-          errors_corrected: corrected.join(','), errors_uncorrected: uncorrected.join(','),
-          levenshtein_distance: lev, final_text: lesText, submitted_at: new Date().toISOString(),
-        }),
-      })
-      if (!res.ok) throw new Error('failed')
-      setShareModalOpen(false); setAppStep('completed')
-    } catch {
-      setSubmitError('Er is iets misgegaan. Probeer het opnieuw.')
-    } finally {
-      setSubmitting(false)
-    }
+    // UI-only — no actual email sending. Navigate straight to completed.
+    setShareModalOpen(false)
+    setAppStep('completed')
   }
 
   if (appStep === 'completed') return <CompletionScreen />
@@ -429,18 +411,6 @@ export default function ExperimentPage() {
 
             {topTab === 'authoring' && (
               <div className="flex flex-col h-full overflow-hidden">
-                {/* Inner sub-tabs */}
-                <div className="bg-white border-b border-gray-100 px-4 flex gap-0 shrink-0">
-                  {(['lesplan', 'lesoverzicht', 'les', 'voorvertoning'] as AuthoringTab[]).map(tab => (
-                    <button key={tab} onClick={() => setActiveTab(tab)}
-                      className={`px-5 py-2.5 text-xs font-medium border-b-2 transition-all ${
-                        activeTab === tab ? 'border-[#F9703D] text-gray-900' : 'border-transparent text-gray-400 hover:text-gray-600'
-                      }`}>
-                      {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                    </button>
-                  ))}
-                </div>
-
                 <div className="flex-1 overflow-hidden relative">
                   {activeTab === 'lesplan' && (
                     <LesplanTab lesduur={lesduur} setLesduur={setLesduur}
@@ -479,7 +449,7 @@ export default function ExperimentPage() {
           onClose={() => setShareModalOpen(false)}
           onDeelMetCollega={handleDeelMetCollega}
           onLesOpSlot={() => { setShareModalOpen(false); setAppStep('completed') }}
-          submitting={submitting} error={submitError} lesText={lesText} />
+          lesText={lesText} />
       )}
     </div>
   )
@@ -847,20 +817,24 @@ function LesoverzichtTab({ lessonOutline, setLessonOutline, lesdoel, loaded, set
                   {active ? (
                     <div className="space-y-2">
                       {topics.map((topic: any, idx: number) => (
-                        <div key={topic.id} className="rounded-xl border border-input bg-gray-50 p-3 flex items-center gap-2">
+                        <div key={topic.id} className="rounded-xl border border-input bg-gray-50 p-3 flex items-center gap-3">
+                          {/* Numbered pill — like original lesoverzicht blocks */}
+                          <span className="w-6 h-6 rounded-full bg-[#039B96] text-white text-xs font-bold flex items-center justify-center shrink-0">
+                            {idx + 1}
+                          </span>
                           <input defaultValue={topic.title} onBlur={e => updateTopic(phase, topic.id, e.target.value)}
-                            className="flex-1 border border-gray-200 rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#039B96]" />
+                            className="flex-1 border-0 bg-transparent text-sm focus:outline-none focus:ring-0 p-0 text-gray-800" />
                           <button onClick={() => moveTopic(phase, idx, 'up')} disabled={idx === 0}
-                            className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 text-gray-500">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
+                            className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 text-gray-400 shrink-0">
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
                           </button>
                           <button onClick={() => moveTopic(phase, idx, 'down')} disabled={idx === topics.length - 1}
-                            className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 text-gray-500">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                            className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 text-gray-400 shrink-0">
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                           </button>
                           <button onClick={() => deleteTopic(phase, topic.id)}
-                            className="p-1.5 rounded hover:bg-red-50 text-red-400 hover:text-red-600">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            className="p-1.5 rounded hover:bg-red-50 text-red-300 hover:text-red-500 shrink-0">
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>
                         </div>
                       ))}
@@ -891,46 +865,92 @@ const PHASE_META: Record<OutlinePhase, { title: string; desc: string }> = {
   afronding:   { title: 'Afronding',   desc: 'Evalueer het leerproces en rond de les af.' },
 }
 
-/** Fake tiptap-style toolbar matching original screenshot */
-function EditorToolbar() {
-  const TBtn = ({ label, icon, bold, italic, strike, mono, active }: {
-    label?: string; icon?: React.ReactNode
-    bold?: boolean; italic?: boolean; strike?: boolean; mono?: boolean; active?: boolean
+// Render content with real heading sizes instead of ## markdown
+function renderContent(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = []
+  let k = 0
+  for (const line of text.split('\n')) {
+    if (!line.trim()) { nodes.push(<br key={k++} />); continue }
+    const html = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    if (line.startsWith('### ')) {
+      nodes.push(<h3 key={k++} className="text-base font-semibold text-gray-900 mt-3 mb-1">{line.slice(4)}</h3>)
+    } else if (line.startsWith('## ')) {
+      nodes.push(<h2 key={k++} className="text-lg font-bold text-gray-900 mt-4 mb-1">{line.slice(3)}</h2>)
+    } else if (line.startsWith('# ')) {
+      nodes.push(<h1 key={k++} className="text-xl font-bold text-gray-900 mt-4 mb-2">{line.slice(2)}</h1>)
+    } else if (line.match(/^\d+\. /)) {
+      nodes.push(<li key={k++} className="ml-5 list-decimal text-sm text-gray-800 leading-relaxed" dangerouslySetInnerHTML={{ __html: html.replace(/^\d+\. /, '') }} />)
+    } else if (line.startsWith('- ')) {
+      nodes.push(<li key={k++} className="ml-5 list-disc text-sm text-gray-800 leading-relaxed" dangerouslySetInnerHTML={{ __html: html.slice(2) }} />)
+    } else {
+      nodes.push(<p key={k++} className="text-sm text-gray-800 leading-relaxed mb-1" dangerouslySetInnerHTML={{ __html: html }} />)
+    }
+  }
+  return nodes
+}
+
+/** Toolbar with WORKING bold/italic/heading buttons via execCommand on a contenteditable */
+function EditorToolbar({ onFormat }: { onFormat: (tag: string) => void }) {
+  const TBtn = ({ label, icon, active, onClick, title }: {
+    label?: string; icon?: React.ReactNode; active?: boolean; onClick: () => void; title?: string
   }) => (
-    <button type="button"
-      className={`w-7 h-7 rounded flex items-center justify-center text-sm transition-colors hover:bg-gray-100 ${active ? 'bg-gray-900 text-white' : 'text-gray-600'}`}>
-      {icon || <span className={`text-xs leading-none ${bold ? 'font-bold' : ''} ${italic ? 'italic' : ''} ${strike ? 'line-through' : ''} ${mono ? 'font-mono' : ''}`}>{label}</span>}
+    <button type="button" title={title} onClick={onClick}
+      className={`w-8 h-8 rounded flex items-center justify-center text-sm transition-colors hover:bg-gray-200 ${active ? 'bg-gray-900 text-white' : 'text-gray-600'}`}>
+      {icon || <span className="text-xs font-medium leading-none">{label}</span>}
     </button>
   )
   const ico = (d: string) => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={d} /></svg>
   return (
     <div className="flex items-center gap-0.5 flex-wrap px-3 py-2 border-b border-gray-100 bg-white">
-      {/* AI sparkle */}
-      <button className="w-7 h-7 rounded-md bg-gradient-to-r from-[#E13AA1] to-[#F63] flex items-center justify-center mr-1">
+      {/* AI sparkle — decorative */}
+      <div className="w-8 h-8 rounded-md bg-gradient-to-r from-[#E13AA1] to-[#F63] flex items-center justify-center mr-1">
         <svg className="w-3.5 h-3.5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/></svg>
-      </button>
-      <TBtn label="Σ" mono />
-      <TBtn label="B" bold /><TBtn label="I" italic /><TBtn label="S" strike /><TBtn label="T" />
-      <TBtn label="H1" active /><TBtn label="H₂" /><TBtn label="H₃" />
-      <TBtn icon={ico('M4 6h16M4 12h8M4 18h16')} />
-      <TBtn icon={ico('M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2')} />
-      <TBtn icon={ico('M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1')} />
-      <TBtn icon={ico('M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z')} />
-      <TBtn icon={ico('M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6')} />
-      <TBtn icon={ico('M21 10H11a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6')} />
-      <TBtn icon={ico('M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01')} />
-      <TBtn icon={ico('M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z')} />
+      </div>
+      <TBtn label="B" title="Vet" onClick={() => onFormat('bold')} />
+      <TBtn label="I" title="Cursief" onClick={() => onFormat('italic')} />
+      <TBtn label="H1" title="Kop 1" onClick={() => onFormat('h1')} />
+      <TBtn label="H2" title="Kop 2" onClick={() => onFormat('h2')} />
+      <TBtn label="H3" title="Kop 3" onClick={() => onFormat('h3')} />
+      <TBtn icon={ico('M4 6h16M4 12h8M4 18h16')} title="Opsomming" onClick={() => onFormat('ul')} />
+      <TBtn icon={ico('M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2')} title="Genummerde lijst" onClick={() => onFormat('ol')} />
     </div>
   )
 }
 
-/** Single text block element — matches original "Alleen tekst" card with tiptap toolbar */
+/** Single editable text block — "Alleen tekst" header + working toolbar + contenteditable */
 function TextBlock({ content, onUpdate }: { content: string; onUpdate: (v: string) => void }) {
-  const [editing, setEditing] = useState(false)
-  const [val, setVal]         = useState(content)
+  const editorRef = React.useRef<HTMLDivElement>(null)
+  const [localHtml, setLocalHtml] = React.useState(() => {
+    // Convert markdown to HTML for display
+    return content.split('\n').map(line => {
+      if (line.startsWith('## '))  return `<h2>${line.slice(3)}</h2>`
+      if (line.startsWith('### ')) return `<h3>${line.slice(4)}</h3>`
+      if (line.startsWith('# '))  return `<h1>${line.slice(2)}</h1>`
+      if (line.startsWith('- '))  return `<li>${line.slice(2)}</li>`
+      if (!line.trim()) return '<br>'
+      return `<p>${line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</p>`
+    }).join('')
+  })
+
+  const handleFormat = (tag: string) => {
+    if (!editorRef.current) return
+    editorRef.current.focus()
+    if (tag === 'bold')   document.execCommand('bold', false)
+    if (tag === 'italic') document.execCommand('italic', false)
+    if (tag === 'h1')     document.execCommand('formatBlock', false, 'h1')
+    if (tag === 'h2')     document.execCommand('formatBlock', false, 'h2')
+    if (tag === 'h3')     document.execCommand('formatBlock', false, 'h3')
+    if (tag === 'ul')     document.execCommand('insertUnorderedList', false)
+    if (tag === 'ol')     document.execCommand('insertOrderedList', false)
+  }
+
+  const handleBlur = () => {
+    if (editorRef.current) onUpdate(editorRef.current.innerText)
+  }
+
   return (
     <div className="rounded-xl border border-input bg-gray-50 overflow-hidden">
-      {/* "Alleen tekst" header row */}
+      {/* "Alleen tekst" header */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-gray-50">
         <button className="flex items-center gap-1.5 text-xs text-gray-600 font-medium bg-white border border-gray-200 rounded-md px-2.5 py-1.5 hover:bg-gray-50">
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h8M4 18h16" /></svg>
@@ -940,41 +960,43 @@ function TextBlock({ content, onUpdate }: { content: string; onUpdate: (v: strin
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
         </button>
       </div>
-      {/* Tiptap-style toolbar */}
-      <EditorToolbar />
-      {/* Content */}
+      <EditorToolbar onFormat={handleFormat} />
+      {/* Contenteditable area — real heading sizes, not ## markdown */}
       <div className="p-5 bg-white">
-        {editing ? (
-          <textarea value={val} onChange={e => setVal(e.target.value)}
-            onBlur={() => { setEditing(false); onUpdate(val) }}
-            autoFocus
-            className="w-full text-sm text-gray-800 min-h-[80px] resize-none focus:outline-none bg-transparent border-0 p-0 leading-relaxed" />
-        ) : (
-          <div onClick={() => setEditing(true)}
-            className="text-sm text-gray-800 cursor-text min-h-[60px] whitespace-pre-wrap leading-relaxed">
-            {val || <span className="text-gray-400 italic">Klik om te bewerken...</span>}
-          </div>
-        )}
+        <div
+          ref={editorRef}
+          contentEditable
+          suppressContentEditableWarning
+          onBlur={handleBlur}
+          dangerouslySetInnerHTML={{ __html: localHtml }}
+          className="text-sm text-gray-800 min-h-[80px] focus:outline-none leading-relaxed [&_h1]:text-xl [&_h1]:font-bold [&_h1]:mb-2 [&_h2]:text-lg [&_h2]:font-bold [&_h2]:mb-1.5 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:mb-1 [&_p]:mb-1.5 [&_ul]:list-disc [&_ul]:ml-5 [&_ol]:list-decimal [&_ol]:ml-5 [&_li]:mb-0.5"
+        />
       </div>
     </div>
   )
 }
 
-/** Phase card — matches original Card: bold title, description, collapse chevron */
-function PhaseCard({ phase, blocks, onUpdate, visible, onToggle }: {
-  phase: OutlinePhase; blocks: string[]; onUpdate: (b: string[]) => void; visible: boolean; onToggle: () => void
+/** Phase card — matches original CardHeader with collapse */
+function PhaseCard({ phase, topics, blocks, onUpdate, visible, onToggle }: {
+  phase: OutlinePhase; topics: string[]; blocks: string[]; onUpdate: (b: string[]) => void; visible: boolean; onToggle: () => void
 }) {
   const meta = PHASE_META[phase]
+  // Combine all blocks into one single block per phase (original has 1 text block per phase intro)
+  const singleBlock = blocks.join('\n\n')
+
+  // Build content from topics (reflects lesoverzicht changes)
+  const topicHeaders = topics.length > 0
+    ? topics.map(t => `## ${t}`).join('\n\n') + '\n\n'
+    : ''
+  const displayContent = blocks.length === 0 ? topicHeaders : singleBlock
+
   return (
-    <div className={`rounded-xl border-2 overflow-hidden bg-white ${visible ? 'border-primary' : 'border-gray-200'}`}
-      style={{ borderColor: visible ? undefined : undefined }}>
-      {/* Clickable header — like original CardHeader */}
-      <div
-        className="flex items-start justify-between px-6 py-5 cursor-pointer hover:bg-gray-50/50 transition-colors relative pr-14"
+    <div className={`rounded-xl border-2 overflow-hidden bg-white ${visible ? 'border-gray-900' : 'border-gray-200'}`}>
+      <div className="flex items-start justify-between px-6 py-5 cursor-pointer hover:bg-gray-50/50 transition-colors relative pr-14"
         onClick={onToggle}>
         <div>
           <h2 className="text-xl font-semibold leading-none tracking-tight">{meta.title}</h2>
-          <p className="text-sm text-muted-foreground mt-1.5">{meta.desc}</p>
+          <p className="text-sm text-gray-500 mt-1.5">{meta.desc}</p>
         </div>
         <div className="absolute right-6 top-1/2 -translate-y-1/2 text-gray-500">
           {visible
@@ -982,28 +1004,17 @@ function PhaseCard({ phase, blocks, onUpdate, visible, onToggle }: {
             : <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
         </div>
       </div>
-      {/* Content — only when expanded */}
       {visible && (
-        <div className="px-6 pb-6 space-y-4">
-          {blocks.map((block, i) => (
-            <TextBlock key={i} content={block}
-              onUpdate={v => { const nb = [...blocks]; nb[i] = v; onUpdate(nb) }} />
-          ))}
+        <div className="px-6 pb-6">
+          {/* Single text block per phase */}
+          <TextBlock
+            content={displayContent}
+            onUpdate={v => onUpdate([v])}
+          />
         </div>
       )}
     </div>
   )
-}
-
-function buildPhaseBlocks(text: string, outline: any): Record<OutlinePhase, string[]> {
-  const all    = text.split('\n\n').filter(b => b.trim().length > 0)
-  const phases: OutlinePhase[] = ['introductie', 'instructie', 'verwerking', 'afronding']
-  const active = phases.filter(p => outline[p].active)
-  const result: Record<OutlinePhase, string[]> = { introductie: [], instructie: [], verwerking: [], afronding: [] }
-  if (!active.length || !all.length) return result
-  const per = Math.ceil(all.length / active.length)
-  active.forEach((phase, i) => { result[phase] = all.slice(i * per, (i + 1) * per) })
-  return result
 }
 
 function LesTab({ lesText, setLesText, lessonOutline, lesdoel, condition, loaded, setLoaded, onPrev, onNext }: any) {
@@ -1012,21 +1023,34 @@ function LesTab({ lesText, setLesText, lessonOutline, lesdoel, condition, loaded
   }, [loaded, setLoaded])
 
   const phases: OutlinePhase[] = ['introductie', 'instructie', 'verwerking', 'afronding']
-  const [phaseBlocks, setPhaseBlocks] = useState<Record<OutlinePhase, string[]>>(() => buildPhaseBlocks(lesText, lessonOutline))
-  const [visiblePhases, setVisiblePhases] = useState<Set<OutlinePhase>>(new Set(phases.filter(p => lessonOutline[p].active)))
+
+  // Build one text block per phase from lesText, grouped by phase
+  const [phaseBlocks, setPhaseBlocks] = useState<Record<OutlinePhase, string[]>>(() => {
+    const all = lesText.split('\n\n').filter((b: string) => b.trim().length > 0)
+    const active = phases.filter(p => lessonOutline[p].active)
+    const result: Record<OutlinePhase, string[]> = { introductie: [], instructie: [], verwerking: [], afronding: [] }
+    if (!active.length || !all.length) return result
+    const per = Math.ceil(all.length / active.length)
+    active.forEach((phase, i) => { result[phase] = [all.slice(i * per, (i + 1) * per).join('\n\n')] })
+    return result
+  })
+
+  const [visiblePhases, setVisiblePhases] = useState<Set<OutlinePhase>>(
+    new Set(phases.filter(p => lessonOutline[p].active))
+  )
 
   const updatePhase = (phase: OutlinePhase, blocks: string[]) => {
     const next = { ...phaseBlocks, [phase]: blocks }
     setPhaseBlocks(next)
     setLesText(phases.flatMap(p => next[p]).join('\n\n'))
   }
+
   const togglePhase = (phase: OutlinePhase) => setVisiblePhases(prev => {
     const s = new Set(prev); if (s.has(phase)) s.delete(phase); else s.add(phase); return s
   })
 
   return (
     <div className="flex h-full overflow-hidden relative">
-      {/* MaxLoader hides everything */}
       <MaxLoader visible={!loaded} message="Max genereert de volledige lesinhoud voor je. Pak vast een kopje koffie! ☕" />
 
       <div className="w-full lg:w-3/5 border-r bg-white overflow-y-auto p-6 md:p-10 pb-32">
@@ -1034,10 +1058,10 @@ function LesTab({ lesText, setLesText, lessonOutline, lesdoel, condition, loaded
         <div className="lg:hidden mb-4"><LesdoelCard lesdoel={lesdoel} /></div>
         <NudgeBox condition={condition} tab="les" />
 
-        {/* Phase cards matching original step3 */}
         <div className="space-y-5">
           {phases.filter(p => lessonOutline[p].active).map(phase => (
             <PhaseCard key={phase} phase={phase}
+              topics={lessonOutline[phase].topics.map((t: any) => t.title)}
               blocks={phaseBlocks[phase]}
               onUpdate={b => updatePhase(phase, b)}
               visible={visiblePhases.has(phase)}
@@ -1105,10 +1129,10 @@ function VoorvertoningTab({ lesText, lesdoel, condition, onPrev, onShare }: any)
 // ─── Share Modal ───────────────────────────────────────────────────────────────
 type Invite = { email: string; role: 'lezer' | 'bewerker' }
 
-function ShareModal({ tab, setTab, onClose, onDeelMetCollega, onLesOpSlot, submitting, error, lesText }: {
+function ShareModal({ tab, setTab, onClose, onDeelMetCollega, onLesOpSlot, lesText }: {
   tab: 'students' | 'colleagues'; setTab: (t: 'students' | 'colleagues') => void
   onClose: () => void; onDeelMetCollega: () => void; onLesOpSlot: () => void
-  submitting: boolean; error: string | null; lesText: string
+  lesText: string
 }) {
   const [emailInput, setEmailInput] = useState('')
   const [roleInput, setRoleInput]   = useState<'lezer' | 'bewerker'>('lezer')
@@ -1197,13 +1221,10 @@ function ShareModal({ tab, setTab, onClose, onDeelMetCollega, onLesOpSlot, submi
                 </div>
               )}
               {invites.length === 0 && <p className="text-sm text-gray-400 mb-4">Voeg collega&apos;s toe om deze les met hen te delen.</p>}
-              {error && <div className="bg-red-50 border border-red-200 rounded-md p-3 mb-4 text-sm text-red-700">{error}</div>}
               <div className="flex justify-end gap-3 pt-3 border-t border-gray-100 mt-2">
                 <Btn variant="secondary" onClick={onClose}>Annuleren</Btn>
-                <Btn variant="primary" onClick={onDeelMetCollega} disabled={submitting}>
-                  {submitting
-                    ? <svg className="animate-spin w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 12 6.477 12 12h-4z"/></svg>
-                    : <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>}
+                <Btn variant="primary" onClick={onDeelMetCollega}>
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                   Delen met collega&apos;s
                 </Btn>
               </div>
